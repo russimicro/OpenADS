@@ -1708,9 +1708,24 @@ CdxIndex::list_tags(const std::string& path) {
     }
     auto dec = decode_compact_leaf_static(leaf, CDX_STRUCT_KEY_LEN);
     if (!dec) return dec.error();
+    // ADS enumerates CDX tags in CREATION order = ascending tag-header offset
+    // (the 2nd field of each struct-leaf entry), NOT the leaf's alphabetical
+    // key order. A CDX written by ADS-SAP / BCC keeps its structure tag sorted
+    // by tag NAME, so returning the leaf order here renumbers the tags and the
+    // RDD's DBSETORDER(n) picks the wrong order (the ERP saw order 1 = ARTICLAS
+    // instead of ARTICULO, so the grid "didn't sort by column"). Sorting by the
+    // tag-header offset matches ADS-SAP's tag numbering. A CDX written by
+    // OpenADS already has its struct leaf in creation order, so this is a no-op
+    // there and existing tests stay green.
+    auto entries = std::move(dec).value();
+    std::stable_sort(entries.begin(), entries.end(),
+                     [](const std::pair<std::string, std::uint32_t>& a,
+                        const std::pair<std::string, std::uint32_t>& b) {
+                         return a.second < b.second;
+                     });
     std::vector<std::string> out;
-    out.reserve(dec.value().size());
-    for (auto& e : dec.value()) {
+    out.reserve(entries.size());
+    for (auto& e : entries) {
         std::string t = e.first;
         while (!t.empty() && t.back() == ' ') t.pop_back();
         out.push_back(std::move(t));

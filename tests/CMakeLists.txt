@@ -74,6 +74,8 @@ add_executable(openads_unit_tests
     unit/abi_create_table_test.cpp
     unit/abi_refresh_extract_test.cpp
     unit/abi_create_index61_test.cpp
+    unit/abi_cdx_tag_order_test.cpp
+    unit/abi_multitag_order_nav_test.cpp
     unit/abi_index_expr_validation_test.cpp
     unit/abi_zap_pack_test.cpp
     unit/abi_pack_reindex_softseek_test.cpp
