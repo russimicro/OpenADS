@@ -7257,6 +7257,7 @@ UNSIGNED32 AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
             : nullptr;
     std::vector<std::pair<std::string, std::uint32_t>> bulk_keys;
     if (cdx_bulk) bulk_keys.reserve(rec_count);
+    auto _ti_scan0 = std::chrono::steady_clock::now();   // [INSTRUMENT temporal]
     for (std::uint32_t r = 1; r <= rec_count; ++r) {
         if (auto rr = t->goto_record_for_build(r); !rr) return fail(rr.error());
         if (t->is_deleted()) continue;
@@ -7275,11 +7276,17 @@ UNSIGNED32 AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
             return fail(ins.error());
         }
     }
+    auto _ti_scan1 = std::chrono::steady_clock::now();   // [INSTRUMENT temporal]
     if (cdx_bulk) {
         if (auto b = cdx_bulk->build_bulk(std::move(bulk_keys)); !b)
             return fail(b.error());
     }
     if (auto fl = idx->flush(); !fl) return fail(fl.error());
+    auto _ti_build1 = std::chrono::steady_clock::now();  // [INSTRUMENT temporal]
+    fprintf(stderr, "[SPLIT] scan=%.1fms  build+flush=%.1fms  recs=%u\n",
+            std::chrono::duration<double, std::milli>(_ti_scan1 - _ti_scan0).count(),
+            std::chrono::duration<double, std::milli>(_ti_build1 - _ti_scan1).count(),
+            rec_count);
 
     auto& m   = index_bindings();
     auto& act = active_binding_for();

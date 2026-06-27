@@ -68,19 +68,34 @@ int main(int argc, char** argv) {
     fprintf(stderr, "Append %d recs: %8.1f ms  (%.0f rec/s)\n",
             N, elapsed, N / (elapsed / 1000.0));
 
-    // Disable deferred flush and create CDX index
+    // Disable deferred flush and create CDX indexes.
     AdsSetDeferredFlush(hTable, 0);
 
     UNSIGNED8 idxfile[] = "bench.cdx";
-    UNSIGNED8 idxname[] = "by_id";
-    UNSIGNED8 idxexpr[] = "ID";
-    ADSHANDLE hIdx = 0;
 
-    double t4 = now_ms();
-    AdsCreateIndex(hTable, idxfile, idxname, idxexpr, nullptr, 0, 0, &hIdx);
-    double t5 = now_ms();
-    fprintf(stderr, "Create CDX:     %8.1f ms\n", t5 - t4);
-    if (hIdx) AdsCloseIndex(hIdx);
+    // Tag 1: built with NO active order yet (table just appended) -> the build
+    // loop's goto_record does no per-record index-cursor reseek. Index VALUE
+    // (random) so it becomes a RANDOM-ordered active order for the next build.
+    UNSIGNED8 nm_v[] = "by_value";  UNSIGNED8 ex_v[] = "VALUE";
+    ADSHANDLE hV = 0;
+    double tv0 = now_ms();
+    AdsCreateIndex(hTable, idxfile, nm_v, ex_v, nullptr, 0, 0, &hV);
+    double tv1 = now_ms();
+    fprintf(stderr, "Tag1 by_value (NO active order):   %8.1f ms\n", tv1 - tv0);
+
+    // Tag 2: built WHILE by_value (random) is the active order. Each
+    // goto_record(r) in the build re-seeks the by_value cursor (O(log n) +
+    // walk) per record -- the pure overhead this prototype removes.
+    UNSIGNED8 nm_a[] = "by_id";  UNSIGNED8 ex_a[] = "ID";
+    ADSHANDLE hA = 0;
+    double ta0 = now_ms();
+    AdsCreateIndex(hTable, idxfile, nm_a, ex_a, nullptr, 0, 0, &hA);
+    double ta1 = now_ms();
+    fprintf(stderr, "Tag2 by_id (active RANDOM order):  %8.1f ms\n", ta1 - ta0);
+    double base = (tv1 - tv0) > 0 ? (tv1 - tv0) : 1.0;
+    fprintf(stderr, ">>> active-order overhead factor:  %.1fx\n", (ta1 - ta0) / base);
+    if (hV) AdsCloseIndex(hV);
+    if (hA) AdsCloseIndex(hA);
 
     // Explicit flush to disk
     double t6 = now_ms();
