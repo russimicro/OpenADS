@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace openads::network {
 
@@ -49,7 +50,33 @@ util::Result<std::size_t> sock_send(Socket& sock,
 util::Result<std::size_t> sock_recv(Socket& sock,
                                      std::uint8_t* buf,
                                      std::size_t n);
+
+// Toggle non-blocking I/O. When enabled, sock_recv returns a would-block error
+// (classified by socket_recv_would_block) instead of blocking when no data is
+// available — the reactor pool relies on this so one stalled client cannot
+// freeze a worker thread (no head-of-line blocking).
+util::Result<void> socket_set_nonblocking(Socket& sock, bool enable);
+bool               socket_recv_would_block(const util::Error& e) noexcept;
+
 void                      sock_close(Socket& sock) noexcept;
+
+// Reactor multiplexing primitive (M-enterprise step 3). socket_poll
+// blocks up to `timeout_ms` (-1 = infinite, 0 = return immediately)
+// until at least one of `items` is readable or has errored, then
+// fills each item's `events` with the ready set. Returns the number
+// of ready sockets (0 on timeout). Backed by WSAPoll on Windows and
+// poll() on POSIX.
+enum class PollEvent : std::uint8_t {
+    None     = 0,
+    Readable = 1,   // data (or EOF / a pending accept) available to read
+    Error    = 2,   // POLLERR / POLLHUP / POLLNVAL
+};
+struct PollItem {
+    Socket       sock;
+    std::uint8_t events = 0;   // in: requested (currently always Readable);
+                               // out: returned ready set (Readable | Error)
+};
+util::Result<int> socket_poll(std::vector<PollItem>& items, int timeout_ms);
 
 // Process-wide network init (Winsock2 WSAStartup on Windows; no-op
 // on POSIX). Idempotent.

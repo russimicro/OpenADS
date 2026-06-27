@@ -210,11 +210,11 @@ Our new DD needs to keep permissions information.  Permissions are granted to gr
 
 ### Open
 
-- [ ] **VFP table support** (DBF `0x30` / `0x31`).
-      `table.cpp:49` returns an error for VFP-typed DBF files. Was in
-      the original M4 plan but deferred. Needs a `VfpDriver` that
-      handles the `_NullFlags` system field for NULL bitmap and the VFP
-      autoinc field type.
+- [ ] **VFP table support** (DBF `0x30` / `0x31` / `0x32`).
+      `table.cpp` rejects unknown VFP header signatures. Autoinc, V/Q types,
+      and NULL-bitmap work separately; combined `0x32` (autoinc + nullable
+      columns) may not parse correctly yet — see `docs/known-issues.md`.
+      Needs a `VfpDriver` for `_NullFlags` and VFP autoinc when combined.
 
 ---
 

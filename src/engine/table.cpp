@@ -22,6 +22,17 @@ namespace openads::engine {
 static std::atomic<bool> g_show_deleted{true};
 bool show_deleted() noexcept { return g_show_deleted.load(); }
 void set_show_deleted(bool v) noexcept { g_show_deleted.store(v); }
+
+// Global SET EXACT flag. Default false = Clipper SET EXACT OFF.
+static std::atomic<bool> g_set_exact{false};
+bool set_exact() noexcept { return g_set_exact.load(); }
+void set_set_exact(bool v) noexcept { g_set_exact.store(v); }
+
+// Global epoch (pivot year for 2-digit dates). Default 1900.
+static std::atomic<std::uint16_t> g_epoch{1900};
+std::uint16_t epoch() noexcept { return g_epoch.load(); }
+void set_epoch(std::uint16_t v) noexcept { g_epoch.store(v); }
+
 } // namespace openads::engine
 
 namespace openads::abi { inline bool show_deleted() noexcept {
@@ -926,6 +937,26 @@ util::Result<void> Table::apply_tx_rollback(std::uint32_t recno,
     return sync_all_indexes_(snap);
 }
 
+util::Result<void> Table::set_record_raw(const std::uint8_t* bytes,
+                                         std::size_t len) {
+    if (state_ != State::Positioned) {
+        // rddads special-cases 5068 to blank out at BOF/EOF; see writeback_.
+        return util::Error{5068, 0, "no record positioned", ""};
+    }
+    if (mode_ == OpenMode::Read) {
+        return util::Error{5000, 0, "table opened read-only", ""};
+    }
+    if (bytes == nullptr) {
+        return util::Error{5000, 0, "null record buffer", ""};
+    }
+    auto snap = snapshot_index_keys_();
+    const std::size_t rl = driver_->record_length();
+    const std::size_t n  = (len < rl) ? len : rl;
+    std::memcpy(record_buf_.data(), bytes, n);
+    if (auto wb = writeback_record_(); !wb) return wb.error();
+    return sync_all_indexes_(snap);
+}
+
 util::Result<void> Table::apply_tx_rollback_append(std::uint32_t recno) {
     if (driver_ == nullptr) {
         return util::Error{5000, 0, "no driver", ""};
@@ -1154,11 +1185,43 @@ util::Result<void> Table::reindex() {
     for (auto* x : extra_index_views_) {
         if (x) snap.emplace_back(x, std::string{});
     }
+    // A conditional (FOR) tag must only hold records that pass its
+    // predicate; reindexing must re-apply that filter, not rebuild the
+    // tag unconditional. Capture each index's FOR clause once.
+    std::vector<std::string> snap_for;
+    snap_for.reserve(snap.size());
+    for (auto& [idx, prev] : snap) {
+        (void)prev;
+        snap_for.push_back(idx ? idx->condition() : std::string{});
+    }
+    bool any_for = false;
+    for (auto& f : snap_for) if (!f.empty()) { any_for = true; break; }
+
+    // Hoisted out of the per-record loop to avoid a heap allocation on every
+    // record of a large table; cleared and refilled each iteration.
+    std::vector<std::pair<drivers::IIndex*, std::string>> pass;
+    if (any_for) pass.reserve(snap.size());
+
     auto rec_count = driver_->record_count();
     for (std::uint32_t r = 1; r <= rec_count; ++r) {
         if (auto g = goto_record_for_build(r); !g) return g.error();
         if (is_deleted()) continue;
-        if (auto s = sync_all_indexes_(snap); !s) return s.error();
+        if (!any_for) {
+            if (auto s = sync_all_indexes_(snap); !s) return s.error();
+            continue;
+        }
+        // Re-insert only into the indexes whose FOR clause this record
+        // passes (an empty FOR is unconditional).
+        pass.clear();
+        for (std::size_t i = 0; i < snap.size(); ++i) {
+            if (snap_for[i].empty() ||
+                evaluate_index_expr_truthy(*this, snap_for[i])) {
+                pass.push_back(snap[i]);
+            }
+        }
+        if (!pass.empty()) {
+            if (auto s = sync_all_indexes_(pass); !s) return s.error();
+        }
     }
 
     // 3) Flush every index so the rebuilt entries hit disk before the
@@ -1210,7 +1273,11 @@ util::Result<void> Table::lock_record_excl(std::uint32_t recno) {
     auto h = locks_.lock_record_excl(driver_->file(), to_lock_type_(),
                                      locking_, recno);
     if (!h) return h.error();
-    recno_locks_.emplace(recno, std::move(h).value());
+    auto [it, inserted] = recno_locks_.emplace(recno, std::move(h).value());
+    if (!inserted) {
+        // Nested acquire on the same record — refcount bumped in LockMgr.
+        (void)it;
+    }
     return load_record_(recno);
 }
 
@@ -1219,16 +1286,21 @@ util::Result<void> Table::try_lock_record_excl(std::uint32_t recno) {
     auto h = locks_.try_lock_record_excl(driver_->file(), to_lock_type_(),
                                          locking_, recno);
     if (!h) return h.error();
-    recno_locks_.emplace(recno, std::move(h).value());
+    auto [it, inserted] = recno_locks_.emplace(recno, std::move(h).value());
+    if (!inserted) {
+        (void)it;
+    }
     return load_record_(recno);
 }
 
 util::Result<void> Table::unlock_record(std::uint32_t recno) {
     auto it = recno_locks_.find(recno);
     if (it != recno_locks_.end()) {
-        it->second.release();
-        recno_locks_.erase(it);
-        locks_.unlock_record(driver_->file(), to_lock_type_(), locking_, recno);
+        if (locks_.unlock_record(driver_->file(), to_lock_type_(), locking_,
+                                 recno)) {
+            it->second.release();
+            recno_locks_.erase(it);
+        }
     }
     return {};
 }
@@ -1237,7 +1309,9 @@ util::Result<void> Table::lock_table_excl() {
     if (mode_ == OpenMode::Read) return {};
     auto h = locks_.lock_table_excl(driver_->file(), to_lock_type_(), locking_);
     if (!h) return h.error();
-    table_lock_ = std::move(h).value();
+    if (!table_lock_) {
+        table_lock_ = std::move(h).value();
+    }
     return {};
 }
 
@@ -1254,15 +1328,18 @@ util::Result<void> Table::try_lock_table_excl() {
     auto h = locks_.try_lock_table_excl(driver_->file(), to_lock_type_(),
                                         locking_);
     if (!h) return h.error();
-    table_lock_ = std::move(h).value();
+    if (!table_lock_) {
+        table_lock_ = std::move(h).value();
+    }
     return {};
 }
 
 util::Result<void> Table::unlock_table() {
     if (table_lock_) {
-        table_lock_->release();
-        table_lock_.reset();
-        locks_.unlock_table(driver_->file(), to_lock_type_(), locking_);
+        if (locks_.unlock_table(driver_->file(), to_lock_type_(), locking_)) {
+            table_lock_->release();
+            table_lock_.reset();
+        }
     }
     return {};
 }

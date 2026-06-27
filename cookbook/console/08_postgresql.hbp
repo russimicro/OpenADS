@@ -1,0 +1,13 @@
+# See 01_hello_table.hbp for what each line means. Only the OpenADS
+# import lib (-L/-l) differs from a stock Harbour project. The PostgreSQL
+# backend (libpq) lives inside the OpenADS DLL, so nothing extra is linked
+# here -- the engine must simply have been built with OPENADS_WITH_POSTGRESQL.
+
+08_postgresql.prg
+
+-lrddads
+-L${OPENADS_LIB}
+-l${OPENADS_ACELIB}
+-lrddcdx
+-lrddntx
+-lrddfpt

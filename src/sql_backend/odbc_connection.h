@@ -73,6 +73,16 @@ public:
     util::Result<void> flush_table(OdbcTable* tbl);
     util::Result<void> delete_record(OdbcTable* tbl);
 
+    // rLock()/fLock() emulated with SQL Server session-scoped application locks
+    // (sp_getapplock / sp_releaseapplock @LockOwner='Session'): cross-connection,
+    // held across statements, auto-released on session end. recno is the 1-based
+    // ACE record number (0 = current). Only SQL Server exposes this primitive;
+    // any other ODBC backend returns AE_FUNCTION_NOT_AVAILABLE.
+    util::Result<void> lock_record(OdbcTable* tbl, std::uint32_t recno);
+    util::Result<void> unlock_record(OdbcTable* tbl, std::uint32_t recno);
+    util::Result<void> lock_table(OdbcTable* tbl);
+    util::Result<void> unlock_table(OdbcTable* tbl);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -17,6 +17,12 @@ jobs:
           - os: windows-2022
             preset: msvc-x64
             tls: false
+          # 32-bit MSVC: many deployments still ship x86. CI must build it
+          # so x86-only breakage (bitness-dependent narrowing C4244/C2220,
+          # SQLLEN*/SQLPOINTER signatures C2733, /WX C4100) can't slip past.
+          - os: windows-2022
+            preset: msvc-x86
+            tls: false
           - os: ubuntu-24.04
             preset: ninja-clang
             tls: false
@@ -77,3 +83,38 @@ jobs:
         env:
           OPENADS_ACE_LIB: ${{ github.workspace }}/build/ninja-clang/src/libace64.so
         run: composer test
+
+  harbour-smoke:
+    name: Harbour smoke (Windows)
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Cache Harbour toolchain
+        uses: actions/cache@v4
+        id: harbour-cache
+        with:
+          path: ${{ runner.temp }}/harbour-ci
+          key: harbour-core-master-msvc64-${{ hashFiles('tools/scripts/bootstrap_harbour_ci.ps1') }}
+
+      - name: Configure OpenADS
+        run: cmake --preset msvc-x64
+        shell: bash
+
+      - name: Build OpenADS + make_cdx
+        run: cmake --build build/msvc-x64 --config Release --target openads_ace make_cdx
+        shell: bash
+
+      - name: Bootstrap Harbour
+        if: steps.harbour-cache.outputs.cache-hit != 'true'
+        run: pwsh -File tools/scripts/bootstrap_harbour_ci.ps1
+        env:
+          HARBOUR_CI_ROOT: ${{ runner.temp }}/harbour-ci
+          GIT_TERMINAL_PROMPT: "0"
+
+      - name: Run Harbour smoke
+        run: pwsh -File tools/scripts/run_harbour_smoke.ps1
+        env:
+          OPENADS_BUILD: ${{ github.workspace }}/build/msvc-x64
+          HARBOUR_ROOT: ${{ runner.temp }}/harbour-ci

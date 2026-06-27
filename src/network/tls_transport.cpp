@@ -98,8 +98,10 @@ public:
         if (rc != 0) return util::Error{openads::AE_REMOTE_ERROR, rc,
             "ssl_config_defaults: " + mbed_msg(rc), ""};
 
-        if (cfg.insecure_skip_verify || cfg.ca_pem.empty()) {
+        if (cfg.insecure_skip_verify) {
             mbedtls_ssl_conf_authmode(&conf_, MBEDTLS_SSL_VERIFY_NONE);
+        } else if (cfg.ca_pem.empty()) {
+            mbedtls_ssl_conf_authmode(&conf_, MBEDTLS_SSL_VERIFY_REQUIRED);
         } else {
             rc = mbedtls_x509_crt_parse(&ca_,
                 reinterpret_cast<const unsigned char*>(cfg.ca_pem.data()),

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -16,6 +17,8 @@
 #include <vector>
 
 namespace openads::network {
+
+class WorkerPool;   // enterprise step 3 — sharded reactor (network/worker_pool.h)
 
 // M12.3 — Phase 2 server skeleton. Spawns an accept thread that
 // hands each connection to a dedicated session thread. The session
@@ -30,8 +33,17 @@ namespace openads::network {
 // this dispatcher in M12.4.
 
 class Server {
+    // SLICE 3a — Session reaches the shared session registry helpers
+    // (register_session, install/erase_session_socket, unregister,
+    // set_session_user, add_session_table, build_mg_snapshot,
+    // kill_session_by_conn_no), creds_, data_dir_, require_auth().
+    friend class Session;
+
 public:
-    Server() = default;
+    // Out-of-line ctor/dtor: the unique_ptr<WorkerPool> member is an
+    // incomplete type in this header, so the special members that would
+    // destroy it must be defined in server.cpp (which sees the full type).
+    Server();
     Server(const Server&) = delete;
     Server& operator=(const Server&) = delete;
     ~Server();
@@ -52,6 +64,17 @@ public:
     // Set the data root directory. Relative paths from Connect frames
     // are resolved under this directory.
     void set_data_dir(const std::string& dir) { data_dir_ = dir; }
+
+    // Enterprise: cap on concurrent session threads (0 = unlimited). Overrides
+    // the env-loaded EnterpriseConfig value; call before start(). Production
+    // reads OPENADS_SERVER_MAX_SESSIONS; this exists mainly for tests.
+    void set_max_sessions(std::uint32_t n) { max_sessions_override_ = n; }
+    // Observability: live session-thread count, and the number of connections
+    // refused because the cap was reached.
+    std::uint32_t active_session_threads() const;
+    std::uint32_t rejected_sessions() const noexcept {
+        return rejected_sessions_.load();
+    }
 
     // studio.web.0.4 — observable session info exposed for the
     // Studio "Sessions" tab. Snapshot is taken under a mutex so
@@ -77,19 +100,40 @@ public:
 private:
     void accept_loop();
     void session_loop(Socket s);
+    // Join + drop every session thread whose loop has returned. Bounds the
+    // live thread set on a long-running server. Caller must NOT hold
+    // sessions_mu_ (this takes it).
+    void reap_finished_threads_();
 
     Socket                   listener_;
     std::uint16_t            port_ = 0;
     std::atomic<bool>        running_{false};
     std::thread              accept_thread_;
     mutable std::mutex       sessions_mu_;
-    std::vector<std::thread> sessions_;
+    // Live session threads keyed by a spawn-time id, plus the ids of threads
+    // whose session_loop has returned. accept_loop reaps finished threads each
+    // iteration so the set stays bounded — it previously only grew (joined
+    // only at shutdown), leaking thread handles on a 24x7 server. Guarded by
+    // sessions_mu_.
+    std::unordered_map<std::uint64_t, std::thread> session_threads_;
+    std::vector<std::uint64_t>                     finished_threads_;
+    std::atomic<std::uint64_t>                     thread_seq_{1};
+    // Enterprise step 3 — when the sharded-reactor pool is enabled
+    // (OPENADS_SERVER_POOL), accept_loop hands each accepted socket to this
+    // pool instead of spawning a per-connection thread. Null = legacy path.
+    std::unique_ptr<WorkerPool>                    pool_;
+    // Enterprise limits resolved at start() (0 = unlimited). The override lets
+    // tests inject a small cap without touching the env-loaded singleton.
+    std::uint32_t                                  max_sessions_ = 0;
+    std::uint32_t                                  max_sessions_override_ = 0;
+    std::atomic<std::uint32_t>                     rejected_sessions_{0};
 
     // Data root directory: relative client paths are resolved under it.
     std::string                                   data_dir_;
 
-    // M12.9 — credential map (user -> password). Read-only after
-    // start() returns; set up at construction time / before start.
+    // M12.9 — credential map (user -> password). Protected by creds_mu_
+    // because add_credential() may run while sessions authenticate.
+    mutable std::mutex                           creds_mu_;
     std::unordered_map<std::string, std::string> creds_;
 
     // studio.web.0.4 — live session registry. session_loop

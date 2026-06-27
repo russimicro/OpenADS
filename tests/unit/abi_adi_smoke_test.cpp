@@ -1,5 +1,5 @@
 // M4 ADI index smoke test.
-// Opens f:\pmsys\data\landlords.adi (skipped when absent) and verifies:
+// Opens tests/fixtures/adi/landlords.adi (skipped when absent) and verifies:
 //   * AdiIndex::list_tags() returns at least one tag
 //   * AdsOpenTable + AdsOpenIndex wire up successfully
 //   * AdsSetOrder + AdsGotoTop + AdsSkip iterate all 7 records without error
@@ -20,7 +20,7 @@
 
 namespace fs = std::filesystem;
 
-static const fs::path kAdtDir  { "f:\\pmsys\\data" };
+static const fs::path kAdtDir  { "tests/fixtures/adi" };
 static const fs::path kAdtPath { kAdtDir / "landlords.adt" };
 static const fs::path kAdiPath { kAdtDir / "landlords.adi" };
 

@@ -109,4 +109,47 @@ TEST_CASE("ABI: odbc navigational write append/update/delete") {
     REQUIRE(AdsDisconnect(hConn) == 0);
 }
 
+TEST_CASE("ABI: odbc AdsLockRecord is cross-connection (SQL Server applock)") {
+    const char* connstr = test_odbc_connstr();
+    if (connstr == nullptr) {
+        MESSAGE("OPENADS_TEST_ODBC_CONNSTR not set; skipping live ODBC lock");
+        return;
+    }
+
+    ADSHANDLE hConnA = connect_odbc(connstr);   // two distinct ODBC sessions
+    ADSHANDLE hConnB = connect_odbc(connstr);
+    ADSHANDLE hA = open_clientes(hConnA);
+    ADSHANDLE hB = open_clientes(hConnB);
+
+    // Record-lock emulation rides SQL Server's sp_getapplock; against any other
+    // ODBC backend it is unsupported, so skip rather than fail there.
+    const UNSIGNED32 rc = AdsLockRecord(hA, 1);
+    if (rc == openads::AE_FUNCTION_NOT_AVAILABLE) {
+        MESSAGE("ODBC backend is not SQL Server; applock unsupported, skipping");
+        REQUIRE(AdsCloseTable(hA) == 0);
+        REQUIRE(AdsCloseTable(hB) == 0);
+        REQUIRE(AdsDisconnect(hConnA) == 0);
+        REQUIRE(AdsDisconnect(hConnB) == 0);
+        return;
+    }
+
+    CHECK(rc == 0);
+    CHECK(AdsLockRecord(hB, 1) != 0);       // refused: A holds it
+    CHECK(AdsUnlockRecord(hA, 1) == 0);
+    CHECK(AdsLockRecord(hB, 1) == 0);       // now free
+    CHECK(AdsUnlockRecord(hB, 1) == 0);
+
+    // Whole-table lock is mutually exclusive across connections too.
+    CHECK(AdsLockTable(hA) == 0);
+    CHECK(AdsLockTable(hB) != 0);
+    CHECK(AdsUnlockTable(hA) == 0);
+    CHECK(AdsLockTable(hB) == 0);
+    CHECK(AdsUnlockTable(hB) == 0);
+
+    REQUIRE(AdsCloseTable(hA) == 0);
+    REQUIRE(AdsCloseTable(hB) == 0);
+    REQUIRE(AdsDisconnect(hConnA) == 0);
+    REQUIRE(AdsDisconnect(hConnB) == 0);
+}
+
 #endif // OPENADS_WITH_ODBC

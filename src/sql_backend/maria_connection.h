@@ -51,6 +51,25 @@ public:
                                   bool soft,
                                   bool last_key);
 
+    // Write surface (mirrors FirebirdConnection): append_blank stages a blank
+    // row, set_field stages one column, flush_record emits an INSERT
+    // (pending_append) or a PK-keyed UPDATE, delete_record a PK-keyed DELETE.
+    util::Result<void> append_blank(MariaTable* tbl);
+    util::Result<void> set_field(MariaTable* tbl,
+                                 const std::string& field_name,
+                                 const std::string& value);
+    util::Result<void> flush_record(MariaTable* tbl);
+    util::Result<void> delete_record(MariaTable* tbl);
+
+    // rLock()/fLock() emulated with MariaDB named locks (GET_LOCK / RELEASE_LOCK):
+    // session-scoped, cross-connection, held across statements. recno is the
+    // 1-based ACE record number (0 = current). lock_record fails if another
+    // session holds it.
+    util::Result<void> lock_record(MariaTable* tbl, std::uint32_t recno);
+    util::Result<void> unlock_record(MariaTable* tbl, std::uint32_t recno);
+    util::Result<void> lock_table(MariaTable* tbl);
+    util::Result<void> unlock_table(MariaTable* tbl);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

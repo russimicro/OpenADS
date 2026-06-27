@@ -4,6 +4,7 @@
 #include "network/socket.h"
 #include "network/transport.h"
 #include "network/wire.h"
+#include "engine/aggregate.h"
 #include "util/result.h"
 
 #include <cstdint>
@@ -14,6 +15,28 @@
 #include <vector>
 
 namespace openads::network {
+
+// Result type for RemoteConnection::fetch_where. `rows` carries the
+// matched column values (row-major); `recnos` is populated iff
+// FetchWhereFlags::WANT_RECNO was set in the request flags (one entry
+// per row, same order as rows). `eof` is true when the server walked
+// to the end of the table during this call.
+struct FetchWhereBatch {
+    std::vector<std::vector<std::string>> rows;
+    std::vector<std::uint32_t>            recnos;   // 1 per row iff WANT_RECNO
+    bool                                  eof = false;
+};
+
+// One requested aggregate (function + column; empty field = COUNT(*)).
+// Defined in engine/aggregate.h so the SQL-backend push-down (abi layer)
+// and the wire client share one type.
+using AggSpec = engine::AggSpec;
+
+// Result of RemoteConnection::aggregate — one scalar per requested AggSpec,
+// in the same order.
+struct AggregateBatch {
+    std::vector<engine::AggValue> values;
+};
 
 struct RemoteTable;
 
@@ -160,6 +183,35 @@ public:
         fetch_batch(std::uint32_t                   id,
                     std::uint32_t                   max_rows,
                     const std::vector<std::string>& columns);
+    // Tier-2 server-side filtered scan. Like fetch_batch, but the
+    // server evaluates `where_expr` (a Clipper-style FOR predicate,
+    // e.g. "AGE > 40 .AND. CITY = 'RIO'") against each row and returns
+    // only the matching rows' requested columns, walking the table
+    // server-side until `max_rows` matches or EOF. Collapses a
+    // non-index-optimisable SET FILTER / COUNT FOR / LOCATE scan from
+    // one round-trip per record to ceil(matches / max_rows). Base
+    // tables only — a SQL cursor already filters via its WHERE clause.
+    // Callers continue the walk like fetch_batch: a batch returning
+    // fewer than `max_rows` rows has reached EOF.
+    // `flags`: FetchWhereFlags::WANT_RECNO (0x01) causes the server to
+    // include each matching row's recno in the reply; the recnos are
+    // stored in FetchWhereBatch::recnos (same order as rows). flags=0
+    // (default) is byte-identical to the v1.4.0 request/reply.
+    util::Result<FetchWhereBatch>
+        fetch_where(std::uint32_t                   id,
+                    std::uint32_t                   max_rows,
+                    const std::string&              where_expr,
+                    const std::vector<std::string>& columns,
+                    std::uint8_t                    flags = 0);
+
+    // Tier-3 — server-side aggregation. The server scans the whole table
+    // once, evaluates `for_expr` per row, and folds each match into the
+    // requested accumulators, returning one scalar per spec (same order).
+    // Base tables only — a SQL cursor already aggregates via SQL.
+    util::Result<AggregateBatch>
+        aggregate(std::uint32_t               id,
+                  const std::string&          for_expr,
+                  const std::vector<AggSpec>& specs);
 
 private:
     util::Result<Frame> request(const Frame& f);
@@ -223,6 +275,16 @@ struct RemoteTable {
     // gates the fast path: when false, AdsIsFound asks the server.
     bool found_cached  = false;
     bool current_found = false;
+    // Filter / AOF expression strings (stored for AdsGetFilter / AdsGetAOF).
+    std::string filter_expr;
+    std::string aof_expr;
+    // Table alias (stored for AdsGetTableAlias).
+    std::string alias;
+    // Server-side wire id of the active controlling index (0 = natural order).
+    // Updated by AdsSetIndexOrder / AdsSetIndexOrderByHandle / AdsOpenIndex.
+    std::uint32_t active_index_id = 0;
+    // Tag name → server wire index id (populated at AdsOpenIndex).
+    std::vector<std::pair<std::string, std::uint32_t>> index_by_tag;
 };
 
 // M12.16 — per-handle wrapper for a remote index. Each tag

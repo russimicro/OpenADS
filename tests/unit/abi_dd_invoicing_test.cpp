@@ -1,6 +1,6 @@
-// abi_dd_invoicing_test.cpp
+﻿// abi_dd_invoicing_test.cpp
 //
-// Comprehensive DD creation test — a complete invoicing system DD built from
+// Comprehensive DD creation test â€” a complete invoicing system DD built from
 // scratch using the C++ DataDict API on top of ABI-created ADT/ADI tables.
 //
 // Schema:
@@ -115,21 +115,21 @@ private:
         if (!cr.has_value()) return false;
         DataDict dd = std::move(cr).value();
 
-        // ── Tables ──────────────────────────────────────────────────────────
-        if (!dd.add_table("customers",  ".\\customers.adt").has_value())  return false;
-        if (!dd.add_table("products",   ".\\products.adt").has_value())   return false;
-        if (!dd.add_table("invoices",   ".\\invoices.adt").has_value())   return false;
-        if (!dd.add_table("inv_detail", ".\\inv_detail.adt").has_value()) return false;
-        if (!dd.add_table("payments",   ".\\payments.adt").has_value())   return false;
+        // â”€â”€ Tables â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        if (!dd.add_table("customers",  "./customers.adt").has_value())  return false;
+        if (!dd.add_table("products",   "./products.adt").has_value())   return false;
+        if (!dd.add_table("invoices",   "./invoices.adt").has_value())   return false;
+        if (!dd.add_table("inv_detail", "./inv_detail.adt").has_value()) return false;
+        if (!dd.add_table("payments",   "./payments.adt").has_value())   return false;
 
-        // ── Index files ─────────────────────────────────────────────────────
-        if (!dd.add_index_file("customers",  ".\\customers.adi",  "").has_value()) return false;
-        if (!dd.add_index_file("products",   ".\\products.adi",   "").has_value()) return false;
-        if (!dd.add_index_file("invoices",   ".\\invoices.adi",   "").has_value()) return false;
-        if (!dd.add_index_file("inv_detail", ".\\inv_detail.adi", "").has_value()) return false;
-        if (!dd.add_index_file("payments",   ".\\payments.adi",   "").has_value()) return false;
+        // â”€â”€ Index files â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        if (!dd.add_index_file("customers",  "./customers.adi",  "").has_value()) return false;
+        if (!dd.add_index_file("products",   "./products.adi",   "").has_value()) return false;
+        if (!dd.add_index_file("invoices",   "./invoices.adi",   "").has_value()) return false;
+        if (!dd.add_index_file("inv_detail", "./inv_detail.adi", "").has_value()) return false;
+        if (!dd.add_index_file("payments",   "./payments.adi",   "").has_value()) return false;
 
-        // ── User-defined functions ───────────────────────────────────────────
+        // â”€â”€ User-defined functions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         {
             DataDict::FunctionEntry fe;
             fe.name           = "fn_discount";
@@ -161,7 +161,7 @@ private:
             if (!dd.create_function(fe).has_value()) return false;
         }
 
-        // ── Stored procedures ────────────────────────────────────────────────
+        // â”€â”€ Stored procedures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         {
             DataDict::ProcEntry pe;
             pe.name          = "sp_create_invoice";
@@ -183,7 +183,7 @@ private:
             if (!dd.create_proc(pe).has_value()) return false;
         }
 
-        // ── Triggers ─────────────────────────────────────────────────────────
+        // â”€â”€ Triggers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         {
             DataDict::TriggerEntry te;
             te.name        = "trg_inv_insert";
@@ -233,7 +233,7 @@ private:
             if (!dd.create_trigger(te).has_value()) return false;
         }
 
-        // ── Referential integrity ─────────────────────────────────────────────
+        // â”€â”€ Referential integrity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         {
             DataDict::RiEntry re;
             re.name       = "fk_inv_cust";
@@ -268,34 +268,34 @@ private:
             if (!dd.create_ri(re).has_value()) return false;
         }
 
-        // ── Groups ───────────────────────────────────────────────────────────
+        // â”€â”€ Groups â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if (!dd.create_group("Managers").has_value())  return false;
         if (!dd.create_group("Clerks").has_value())    return false;
         if (!dd.create_group("Auditors").has_value())  return false;
 
-        // ── Users ────────────────────────────────────────────────────────────
-        // admin → DB:Admin + Managers (default admin with elevated rights)
+        // â”€â”€ Users â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // admin â†’ DB:Admin + Managers (default admin with elevated rights)
         if (!dd.create_user("admin").has_value()) return false;
         if (!dd.set_user_property("admin", "prop_1101", "admin123").has_value()) return false;
         if (!dd.add_user_to_group("admin", "DB:Admin").has_value())  return false;
         if (!dd.add_user_to_group("admin", "Managers").has_value())  return false;
 
-        // manager1 → Managers
+        // manager1 â†’ Managers
         if (!dd.create_user("manager1").has_value()) return false;
         if (!dd.set_user_property("manager1", "prop_1101", "mgr111").has_value()) return false;
         if (!dd.add_user_to_group("manager1", "Managers").has_value()) return false;
 
-        // clerk1 → Clerks
+        // clerk1 â†’ Clerks
         if (!dd.create_user("clerk1").has_value()) return false;
         if (!dd.set_user_property("clerk1", "prop_1101", "clk111").has_value()) return false;
         if (!dd.add_user_to_group("clerk1", "Clerks").has_value()) return false;
 
-        // auditor1 → Auditors
+        // auditor1 â†’ Auditors
         if (!dd.create_user("auditor1").has_value()) return false;
         if (!dd.set_user_property("auditor1", "prop_1101", "aud111").has_value()) return false;
         if (!dd.add_user_to_group("auditor1", "Auditors").has_value()) return false;
 
-        // ── Table permissions (coarse-level, persisted via TABLEPERM) ─────────
+        // â”€â”€ Table permissions (coarse-level, persisted via TABLEPERM) â”€â”€â”€â”€â”€â”€â”€â”€â”€
         static const char* kAllTables[] = {
             "customers", "products", "invoices", "inv_detail", "payments"
         };
@@ -312,7 +312,7 @@ private:
         }
         if (!dd.set_table_permission("products", "Clerks", 1).has_value()) return false;
 
-        // ── Fine-grained permissions (EXECUTE on SPs and functions) ───────────
+        // â”€â”€ Fine-grained permissions (EXECUTE on SPs and functions) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Managers and Clerks can execute SPs; Auditors cannot.
         static const char* kSPs[] = {"sp_create_invoice", "sp_apply_payment"};
         for (const char* sp : kSPs) {
@@ -327,7 +327,7 @@ private:
             if (!dd.grant_permission("Function", fn, "Auditors",  0x004u).has_value()) return false;
         }
 
-        // ── DB properties ─────────────────────────────────────────────────────
+        // â”€â”€ DB properties â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if (!dd.set_db_property("prop_5", "1").has_value()) return false;  // login required
 
         return true;
@@ -426,10 +426,10 @@ private:
 }  // namespace
 
 // ===========================================================================
-// Test cases — each reopens the DD from disk to verify round-trip persistence
+// Test cases â€” each reopens the DD from disk to verify round-trip persistence
 // ===========================================================================
 
-TEST_CASE("DD invoicing — ADT and ADI files created on disk") {
+TEST_CASE("DD invoicing â€” ADT and ADI files created on disk") {
     InvoicingFixture f;
     REQUIRE(f.ok);
 
@@ -447,7 +447,7 @@ TEST_CASE("DD invoicing — ADT and ADI files created on disk") {
     CHECK(fs::exists(f.add_path));
 }
 
-TEST_CASE("DD invoicing — tables registered in DD") {
+TEST_CASE("DD invoicing â€” tables registered in DD") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -458,13 +458,13 @@ TEST_CASE("DD invoicing — tables registered in DD") {
     CHECK(dd.has_alias("inv_detail"));
     CHECK(dd.has_alias("payments"));
 
-    CHECK(dd.resolve("customers")  == ".\\customers.adt");
-    CHECK(dd.resolve("invoices")   == ".\\invoices.adt");
-    CHECK(dd.resolve("inv_detail") == ".\\inv_detail.adt");
-    CHECK(dd.resolve("payments")   == ".\\payments.adt");
+    CHECK(dd.resolve("customers")  == "./customers.adt");
+    CHECK(dd.resolve("invoices")   == "./invoices.adt");
+    CHECK(dd.resolve("inv_detail") == "./inv_detail.adt");
+    CHECK(dd.resolve("payments")   == "./payments.adt");
 }
 
-TEST_CASE("DD invoicing — index files registered in DD") {
+TEST_CASE("DD invoicing â€” index files registered in DD") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -476,14 +476,14 @@ TEST_CASE("DD invoicing — index files registered in DD") {
         }
         return false;
     };
-    CHECK(has_index("customers",  ".\\customers.adi"));
-    CHECK(has_index("products",   ".\\products.adi"));
-    CHECK(has_index("invoices",   ".\\invoices.adi"));
-    CHECK(has_index("inv_detail", ".\\inv_detail.adi"));
-    CHECK(has_index("payments",   ".\\payments.adi"));
+    CHECK(has_index("customers",  "./customers.adi"));
+    CHECK(has_index("products",   "./products.adi"));
+    CHECK(has_index("invoices",   "./invoices.adi"));
+    CHECK(has_index("inv_detail", "./inv_detail.adi"));
+    CHECK(has_index("payments",   "./payments.adi"));
 }
 
-TEST_CASE("DD invoicing — functions round-trip") {
+TEST_CASE("DD invoicing â€” functions round-trip") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -506,7 +506,7 @@ TEST_CASE("DD invoicing — functions round-trip") {
     CHECK(out.implementation.find("payments") != std::string::npos);
 }
 
-TEST_CASE("DD invoicing — stored procedures round-trip") {
+TEST_CASE("DD invoicing â€” stored procedures round-trip") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -527,7 +527,7 @@ TEST_CASE("DD invoicing — stored procedures round-trip") {
     CHECK(ap.output_params == "pay_id:C;balance:N");
 }
 
-TEST_CASE("DD invoicing — triggers round-trip") {
+TEST_CASE("DD invoicing â€” triggers round-trip") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -559,7 +559,7 @@ TEST_CASE("DD invoicing — triggers round-trip") {
     CHECK(tp->procedure   == "UpdateInvoiceStatus");
 }
 
-TEST_CASE("DD invoicing — referential integrity rules round-trip") {
+TEST_CASE("DD invoicing â€” referential integrity rules round-trip") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -587,7 +587,7 @@ TEST_CASE("DD invoicing — referential integrity rules round-trip") {
     CHECK(r3.child  == "payments");
 }
 
-TEST_CASE("DD invoicing — groups, users, memberships round-trip") {
+TEST_CASE("DD invoicing â€” groups, users, memberships round-trip") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -610,13 +610,13 @@ TEST_CASE("DD invoicing — groups, users, memberships round-trip") {
     CHECK(dd.is_member_of("clerk1",   "Clerks"));
     CHECK(dd.is_member_of("auditor1", "Auditors"));
 
-    // Negative checks — no cross-group leakage
+    // Negative checks â€” no cross-group leakage
     CHECK_FALSE(dd.is_member_of("clerk1",   "Managers"));
     CHECK_FALSE(dd.is_member_of("auditor1", "Clerks"));
     CHECK_FALSE(dd.is_member_of("clerk1",   "DB:Admin"));
 }
 
-TEST_CASE("DD invoicing — table permissions round-trip") {
+TEST_CASE("DD invoicing â€” table permissions round-trip") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -640,7 +640,7 @@ TEST_CASE("DD invoicing — table permissions round-trip") {
     CHECK(dd.get_effective_permission("clerk1", "products") == 1);
 }
 
-TEST_CASE("DD invoicing — SP and function execute permissions round-trip") {
+TEST_CASE("DD invoicing â€” SP and function execute permissions round-trip") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -670,7 +670,7 @@ TEST_CASE("DD invoicing — SP and function execute permissions round-trip") {
         CHECK(find_perm("StoredProc", sp, "Auditors") == nullptr);
     }
 
-    // Function execute grants — all three groups
+    // Function execute grants â€” all three groups
     for (const char* fn : {"fn_discount", "fn_tax", "fn_outstanding"}) {
         for (const char* grp : {"Managers", "Clerks", "Auditors"}) {
             const auto* pe = find_perm("Function", fn, grp);
@@ -680,7 +680,7 @@ TEST_CASE("DD invoicing — SP and function execute permissions round-trip") {
     }
 }
 
-TEST_CASE("DD invoicing — DB:Admin user can open tables via ABI") {
+TEST_CASE("DD invoicing â€” DB:Admin user can open tables via ABI") {
     InvoicingFixture f;
     REQUIRE(f.ok);
 
@@ -709,3 +709,4 @@ TEST_CASE("DD invoicing — DB:Admin user can open tables via ABI") {
 
     AdsDisconnect(hConn);
 }
+

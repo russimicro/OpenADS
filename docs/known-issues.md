@@ -6,107 +6,80 @@ nav_order: 9
 
 # Known issues — current
 
-Status as of **v1.0.0-rc27** (2026-05-17). The historical M3-era
-compat-breaking CDX / NTX list that lived here is closed and now
-only survives in `git log`.
+Status as of **v1.5.0** (2026-06-27).
 
 ## Open
 
-### X# `AXDBFCDX` RDD — minor gaps
+### SAP ACE wire protocol
 
-The full `tests/smoke/xsharp/AdsSmoke.prg` + `AdsSmoke_remote.prg`
-flow passes (rc19), but a handful of `ADSRDD.prg` entry points
-still resolve to `AE_FUNCTION_NOT_AVAILABLE` so the X# runtime
-falls back to its own client path. The X# RDD keeps working — but
-applications that explicitly depend on these calls will hit the
-not-available path.
+OpenADS speaks its own documented wire protocol on `tcp://` / `tls://`.
+It is **not** byte-compatible with the proprietary SAP Advantage 11.x/12.x
+TCP protocol. Talking to a legacy ADS server as a drop-in client requires
+a future `SapWireTransport` layer (`ads://` / `sap://` URIs).
 
-- `AdsEval*Expr` family — server-side expression evaluation
-  helpers used by `ADSRDD.prg`'s server-side query path. The
-  client-side fallback handles every common case.
-- A handful of `AdsStmt*` helpers used by the X# SQL surface.
-- The RI / unique / autoinc enforcement *toggles* are
-  accept-and-ignore (the underlying enforcement still happens
-  through `AdsCreateIndex` / DD).
+### SAP-imported Data Dictionary permissions
 
-See [rddads / X# RDD compat](en/rddads-compat/) for the full
-list of versioned overloads and what each one does.
+For `.add` files created by SAP Data Architect, per-table group
+permission levels are encoded in encrypted 8-byte blobs that OpenADS
+cannot decode yet. Imported DDs may show full DML for every group
+where SAP shows read-only access. Use `pmsys_imported.add` (via
+`tools/import_dd`) or grant permissions from OpenADS-native tooling.
 
-### Wire-protocol forward-only prefetch
+### TLS certificate verification
 
-`M12.21` prefetch (forward-only row look-ahead on `Skip(+N)`)
-was disabled in **M12.21b** (rc9) after cursor-drift
-regressions on indexed scans. The wire still benefits from the
-row cache (M12.17), nav-ack trailer (M12.18), and record-count
-cache (M12.19), but speculative read-ahead is currently off.
+`tls://` verifies peer certificates by default. Self-signed or
+private-CA endpoints require either a CA bundle (future
+`AdsSetTlsCa` entry point) or the dev-only environment variable
+`OPENADS_TLS_INSECURE=1`.
+
+### Server-side TLS termination
+
+Client-side TLS (`tls://` in `ace64.dll`) is implemented via mbedtls.
+`openads_serverd` does not terminate TLS natively — front it with
+nginx, Caddy, or stunnel. See [TLS deployment](en/tls-deployment/).
 
 ### Studio LocalServer auth
 
-LocalServer mode (the Studio embedded in `ace64.dll` /
-`ace32.dll`) currently has no HTTP Basic auth. The default bind
-host is `127.0.0.1`, so a desktop app does not silently expose
-its data dir to the LAN — but if you set
-`OPENADS_STUDIO_HOST=0.0.0.0`, put the console behind a reverse
-proxy that handles authentication. Remote Server mode
-(`openads_serverd`) supports `--http-user user:password`.
+LocalServer mode (Studio embedded in `ace64.dll` / `ace32.dll`) has no
+HTTP Basic auth. The default bind is `127.0.0.1`; if you set
+`OPENADS_STUDIO_HOST=0.0.0.0`, put the console behind a reverse proxy
+that handles authentication. Remote Server mode (`openads_serverd`)
+supports `--http-user user:password`.
 
-### Studio HTTPS
+### Remote ABI gaps
 
-The embedded HTTP console (cpp-httplib) only ships TLS via
-OpenSSL, which isn't bundled in the daemon to keep the release
-binary lean. Terminate HTTPS in front with Caddy / nginx /
-stunnel / SSH tunnel — see [TLS deployment](en/tls-deployment/)
-for the recipes. A dedicated `OPENADS_WITH_OPENSSL=ON` CMake
-option is on the roadmap.
+Some `Ads*` entry points still return `AE_FUNCTION_NOT_AVAILABLE` on
+`tcp://` remote tables while the local path works:
 
-## Closed in v1.0.0-rc1 .. rc27
+- `AdsSetRelation` / `AdsSetScopedRelation`
+- `AdsSetRecord`
+- `AdsCustomizeAOF`
+- `AdsGetRecordCRC`
+- `AdsAggregate` / `AdsFetchWhere` (local in-process; wire opcodes exist)
 
-See `CHANGELOG.md` for the full per-release breakdown. The big
-ones since the M3-era list:
+### VFP combined header (0x32)
 
-- **M3 CDX / NTX compat-breaking issues** — all closed by
-  `M3.6` .. `M3.10` (`bBits` formula, compound structure-tag,
-  branch descent endian / offset, multi-tag-per-file, multi-
-  level NTX, descending / unique round-trip, deleted records
-  excluded from `AdsCreateIndex`).
-- **TLS** — shipped in v0.4.0 (M12.12 / M12.13).
-- **AOF / Rushmore** — shipped in v1.0.0-rc12; `AdsSetAOF` no
-  longer fails on non-optimisable expressions since rc21.
-- **X# `AXDBFCDX` RDD compatibility** — shipped in
-  v1.0.0-rc19 (M12.22 / M12.23), full local + remote.
-- **DBF header last-update date** — shipped in rc21 (M12.24)
-  and rc22 (M12.25 stamps on create).
-- **Embedded Studio** (LocalServer mode) — shipped in
-  v1.0.0-rc9.
-- **Wire perf (~30× xbrowse repaint)** — shipped in rc18 via
-  M12.17..M12.20.
-- **Windows Service + systemd / launchd units** — shipped in
-  rc14.
-- **`AdsMg*` server telemetry** — shipped in v1.0.0-rc24; the
-  ~17 management functions report real figures instead of
-  zero-fill stubs.
-- **Index correctness** — shipped in v1.0.0-rc25:
-  `AdsCreateIndex61` decoded the wrong option bit (built every
-  CDX / NTX tag descending), `ALIAS->FIELD` index keys were
-  unparseable, and not-positioned reads returned generic 5000
-  instead of `AE_NO_CURRENT_RECORD` (5026).
-- **PHP binding** — shipped in v1.0.0-rc26; `bindings/php`
-  (`openads/openads-php`) is a pure-PHP FFI package wrapping the
-  ACE library, with a modern OOP API. The same release fixed the
-  SQL parser's missing `''` string-escape handling. rc27 added
-  `Cursor::fetchAssoc/fetchNum` and `Table::seek`.
-- **`AdsGetField` CHARACTER padding** — shipped in v1.0.0-rc27;
-  CHAR fields were returned with trailing spaces stripped, so
-  Harbour `mini_xbrowse /ads` auto-sized and truncated text
-  columns. `AdsGetField` now pads CHAR values to the declared
-  field width. The same release restored
-  `tools/harbour_patch/rddads-compat.patch` (a dropped context
-  line had broken `git apply`).
+Autoinc, V/Q types, and NULL-bitmap work separately. Tables that combine
+autoinc **and** nullable columns under the VFP `0x32` header signature
+may not parse correctly yet.
 
-## Reporting
+### DDL execution
 
-File issues at
-[github.com/FiveTechSoft/OpenADS/issues](https://github.com/FiveTechSoft/OpenADS/issues).
-For X# RDD specifics, include the `ADSRDD.prg` entry point that
-returned `AE_FUNCTION_NOT_AVAILABLE` and the exact call site —
-that's what drove the M12.22 / M12.23 batches.
+`ALTER TABLE`, `DROP TABLE`, and `DROP INDEX` are parsed (v1.5.0) but
+backend execution hooks are not wired yet.
+
+## Closed recently
+
+- **Path traversal on remote Connect** — fixed v1.5.1: client paths are
+  canonicalized and jailed under `openads_serverd --data`.
+- **LockMgr nested unlock** — fixed v1.5.1: OS byte locks stay held until
+  the final nested `unlock_*`.
+- **Remote memo/Unicode/date/raw field writes** — fixed v1.5.1:
+  `AdsGetMemoDataType`, `AdsSetStringW`, `AdsSetJulian`, `AdsSetFieldRaw`
+  route through `tcp://`.
+- **Wire-protocol forward-only prefetch** — re-enabled v1.0.3 (PR #47);
+  sequential prefetch on `Skip(+N)` with cursor resync.
+- **AdsEval*Expr / AdsStmt*** — implemented; no longer stubs.
+- **X# AXDBFCDX RDD** — local + remote smoke passes (rc19).
+
+See `CHANGELOG.md` for the full per-release breakdown.

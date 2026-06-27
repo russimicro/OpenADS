@@ -5,6 +5,201 @@ All notable changes to OpenADS are recorded here. The project follows
 0.x.y releases may break the C ABI between minor versions to track
 the real ACE SDK.
 
+## 1.5.0 — 2026-06-27
+
+### SQL Backend Tier-1 Improvements (SQLRDD Patterns)
+
+- **`BackendTxManager`: nested transactions + auto-commit.**
+  Shared transaction manager embedded in every SQL backend connection.
+  Supports nested BEGIN/COMMIT with SAVEPOINT emulation, auto-commit
+  after N DML statements (configurable via connection string), and
+  dirty-flag tracking. SQLRDD reference: `SR_CONNECTION:nTransacCount`,
+  `nAutoCommit`, `nIteractions`.
+- **`BackendFieldOptimizer`: lazy column loading with learning.**
+  Tracks which columns are actually read per table. After
+  `LEARNING_THRESHOLD` (5) unique single-column fetches, switches to
+  `SELECT *` to avoid repeated demand-fetches. Integrated into
+  `SqliteTable` and `PostgresTable`. SQLRDD reference:
+  `SR_WORKAREA:sqlGetValue`, `FIELD_LIST_*`.
+- **`BackendWhereBuilder`: restrictor composition.** Combines For
+  clause, user filter, scope bounds, index restrictions, AOF
+  predicates, and recno filters into a single AND-ed WHERE clause.
+  Handles exact seek (lower == upper collapses to `=`) and range
+  seek. SQLRDD reference: `SR_WORKAREA:SolveRestrictors`.
+- **`BackendTableOps` vtable: transaction ops.** New `begin_tx`,
+  `commit_tx`, `rollback_tx`, `set_auto_commit` function pointers
+  in the backend vtable. SQLite and PostgreSQL adapters registered.
+
+### SQL Push-Down Expansion
+
+- **50+ new translatable functions.** The `try_emit_sql_where()`
+  emitter now handles STR, VAL, DTOS, DTOC, CTOD, ROUND, CEILING,
+  CEIL, MOD, EXP, LOG, LOG10, SQRT, SIGN, PADR, PADL, PADC, STRTRAN,
+  LEFT, RIGHT, AT, ATNUM, DATEADD, DATEDIFF, IIF, IF, NIL, ISNULL,
+  ISBLANK, EMPTY, LEN, YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW,
+  CDOW, CMONTH, NOW, and more. Unsupported functions (RECNO, DELETED,
+  REPLICATE, SPACE, STUFF, OCCURS) decline cleanly.
+- **`$` contains: field-to-field support.** `field1 $ field2` now
+  emits `field2 LIKE '%' || field1 || '%'` (or CONCAT variant).
+  Literals with LIKE wildcards (% _ \) still decline to avoid
+  semantic mismatch.
+- **`SqlDialect` expansion.** New fields: `length_fn` (LEN →
+  LENGTH/CHAR_LENGTH), `now_fn` (DATE() → NOW()/CURRENT_DATE),
+  `true_literal` / `false_literal` for .T./.F. rendering.
+
+### UNION / UNION ALL Parser
+
+- **`UNION [ALL]` SELECT support.** The SQL parser now handles
+  `SELECT ... UNION [ALL] SELECT ...` with any nesting depth.
+  Parsed via `SelectStmt::UnionMember` list; each member carries
+  its own FROM, WHERE, ORDER BY, LIMIT, and aliases. Full
+  round-trip through ADS query execution.
+
+### ALTER TABLE / DROP TABLE / DROP INDEX
+
+- **DDL statement parsing.** New `AlterTableStmt`, `DropTableStmt`,
+  `DropIndexStmt` structs with full parser support. Identifiers,
+  quoted names, and IF EXISTS clauses are all handled. Ready for
+  backend execution hooks.
+
+### AOF Expression Expansion
+
+- **LIKE operator.** `NAME LIKE 'A%'` now parses and round-trips
+  in the AOF expression layer with full `%` and `_` wildcard
+  support.
+- **IS NULL / IS NOT NULL.** Unary null-test operators added to
+  the AOF filter expression grammar.
+
+## 1.4.0 — 2026-06-26
+
+### ADS Dialect Compatibility (ERP Harbour/FiveWin)
+
+- **N-way comma join (3+ tables).** `FROM a, b, c, d, e` now
+  parses and executes with an arbitrary number of tables (was limited
+  to exactly 2). Left-deep execution plan with hash-join on composite
+  keys. Filter pushdown pushes WHERE residuals to the deepest join
+  level. Pinned by `sql_parser_test` and `abi_cdx_conditional_index_test`.
+- **`<alias>.*` wildcard projection.** `SELECT line.*` expands to
+  all columns of the aliased table, matching ADS behaviour.
+- **`UPPER(col)` scalar function in WHERE.** Parsed and mapped to
+  a case-insensitive comparison, so `WHERE UPPER(name) = 'SMITH'`
+  now works end-to-end.
+- **`FROM t AS a` table alias on the base table.** Previously only
+  consumed for derived tables; now accepted on plain table names.
+- **Brackets `[file.dat]` for free-table names in FROM.** The
+  `read_identifier_or_filename()` parser now handles `[...]` syntax,
+  matching ADS canonical free-table references.
+- **`WHERE 1 = 1` constant folding.** Always-true predicates are
+  folded at parse time, eliminating unnecessary runtime evaluation.
+- **ODBC temporal literals.** `{d 'YYYY-MM-DD'}`, `{ts ...}`,
+  `{t ...}` are now parsed and accepted in SQL.
+
+### CDX Index Engine
+
+- **Bulk-load index builder (`build_bulk`).** New bottom-up
+  B+tree construction path for `CREATE INDEX` — approximately 10×
+  faster than record-by-record `insert()` on large tables. The
+  builder sorts keys in-memory and emits a complete B+tree in a
+  single pass.
+- **O(1) browse position cache.** `ordered_recnos_cached()` and
+  `pos_of_recno_cached()` on `CdxIndex` cache the key↔recno
+  mapping so `AdsGetRelKeyPos` / `AdsGetKeyNum` answer from an
+  in-memory vector instead of walking the index.
+- **CDX conditional (FOR) index predicates — persist + apply.**
+  `CREATE INDEX ... FOR <condition>` now persists the condition in
+  the CDX sub-tag header and applies it at insert time — only
+  records satisfying the FOR clause get indexed. Full round-trip
+  through reopen. Pinned by `abi_cdx_conditional_index_test`.
+- **CDX flush-skip for read-only.** Opening and closing a CDX
+  file no longer triggers a flush when no page is dirty.
+- **CDX FOR-clause hardening.** Fails loud instead of silently
+  dropping or truncating unparseable FOR clauses.
+- **NTX empty-but-rooted leaf on PACK/reindex.** Fixes error 5004
+  when reindexing an NTX that had empty leaves left by prior
+  `erase()` calls. Pinned by `abi_ntx_pack_reindex_test`.
+- **Composite CDX key width not pinned to the 254-byte probe.**
+  Follow-up to the v1.2.3 character-key fix (PR #68): a composite
+  key expression no longer derives its on-disk width from the 254-byte
+  evaluation probe — it uses the actual key width, so composite tags
+  stay the right size and interoperate with native readers.
+
+### Wire Protocol
+
+- **Server-side filtered scan (`FetchWhere`).** New `FetchWhere`
+  opcode (`0xA4`) lets the client send a Clipper-style FOR predicate
+  and receive only matching rows — reducing round-trips and bandwidth
+  for non-AOF predicates. Evaluated with the same engine evaluator
+  used for CDX FOR index conditions. Documented in
+  `docs/wire-protocol.md` §5.22.
+
+### Enterprise Server
+
+- **Sharded-reactor connection pool (`WorkerPool`).** New
+  `WorkerPool` class multiplexes many client connections over a
+  fixed pool of worker threads (default OFF via
+  `OPENADS_SERVER_POOL=ON`). Includes `FrameReader` for
+  non-blocking partial-frame buffering and `Session` class extracted
+  from `server.cpp`. Stress harnesses: `tools/stress/remote_random_main.cpp`
+  and `tools/stress/remote_concurrency_main.cpp`.
+- **`EnterpriseConfig` singleton.** Environment-driven tunables:
+  `OPENADS_SERVER_POOL` (enable pool), `OPENADS_SERVER_POOL_WORKERS`
+  (thread count), `OPENADS_SERVER_MAX_SESSIONS` (connection cap),
+  pool toggles for ODBC/SQLite/OLEDB backends.
+- **Session reaping + max-sessions cap.** Abandoned connections are
+  reaped after a timeout; a hard cap prevents thread exhaustion
+  under load. Deadlock-free `stop()` lifecycle.
+
+### SQL Backend Improvements
+
+- **PostgreSQL column metadata via information schema.**
+  `AdsDDGetFieldProperty` for PostgreSQL tables now exposes
+  `IS_NULLABLE` and `COLUMN_DEFAULT` via `information_schema.columns`.
+- **SQL concurrency safety — stmt_map serialisation.** Concurrent
+  SQL statement execution no longer corrupts the internal statement
+  map; access is serialised.
+- **SQLite busy-timeout + WAL mode.** Contended SQLite writes no
+  longer fail with `SQLITE_BUSY`; a busy-timeout and WAL journal
+  mode are enabled at connection time.
+- **SQL CREATE TABLE honours statement table type.** `CREATE TABLE`
+  and `CREATE TABLE ... AS` now respect the type specified in the
+  statement (e.g. `ADS_ADT`).
+
+### ADT
+
+- **ADT companion stream count.** `AdsCreateTable(ADS_ADT)` now
+  writes the correct ADT header companion-type count instead of a
+  flat 1.
+
+### ABI
+
+- **Connection / handle introspection.** `AdsGetConnectionType`
+  reports `ADS_REMOTE_SERVER` for a remote handle (local otherwise);
+  `AdsGetHandleType` dispatches on the registry handle kind
+  (connection / table across all backends / statement);
+  `AdsGetIndexCondition` / `AdsGetIndexFilename` return real values
+  instead of empty stubs.
+
+### Build
+
+- **Strict-warning (`-Werror`) cleanups in `data_dict.cpp`.**
+  Explicit casts in `le16()` and the `\uXXXX` escape loop, and removal
+  of two dead static helpers (`trim`, `split_tabs`), so the data
+  dictionary compiles clean under clang/gcc `-Wconversion`/
+  `-Wsign-conversion` and MSVC `/WX` (C4505).
+
+### Tests & Tooling
+
+- **xBase++ smoke test.** New `tests/xpp/` directory with a
+  raw-ACE smoke test via `DllPrepareCall`, plus translations (ES,
+  PT). Runner: `tests/xpp/run.sh`.
+- **FiveWin ORM cookbook.** New `cookbook/orm/fivewin/` with a
+  `grid_orm.prg` example, FiveWin build script, and README.
+- **CDX empty-table key-width edge test.** Verifies correct key
+  width for composite expressions on an empty table.
+- **Concurrent SQL + SQLite contention tests.**
+  `abi_sql_stmt_concurrency_test` and `sqlite_concurrency_test`
+  validate thread-safety under contention.
+
 ## 1.3.0 — 2026-06-25
 
 - **CDX index direction fix for Harbour rddads (FiveWin).** `AdsCreateIndex61`

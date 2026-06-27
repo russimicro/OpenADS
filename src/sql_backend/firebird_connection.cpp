@@ -16,11 +16,13 @@ namespace openads::sql_backend {}
 #include <ibase.h>
 
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -433,9 +435,11 @@ util::Result<void> exec_dml(isc_db_handle* db, isc_tr_handle* tr,
 // ---- Impl ----------------------------------------------------------------
 
 struct FirebirdConnection::Impl {
-    isc_db_handle      db = 0;
-    isc_tr_handle      tr = 0;
-    mutable std::mutex mu;
+    isc_db_handle         db = 0;
+    isc_tr_handle         tr = 0;
+    mutable std::mutex    mu;
+    bool                  lock_table_ready = false;
+    std::set<std::string> held_locks;       // OPENADS$LOCKS keys this conn holds
 };
 
 FirebirdConnection::FirebirdConnection() = default;
@@ -491,6 +495,103 @@ util::Result<void> start_tx(isc_db_handle* db, isc_tr_handle* tr) {
     return util::Result<void>{};
 }
 
+// ---- rLock()/fLock() emulation via a lock table -------------------------
+//
+// Firebird has no advisory-lock primitive (no GET_LOCK / pg_advisory_lock), so
+// mutual exclusion across attachments is built on a tiny lock table whose only
+// column is a unique key: INSERT acquires, DELETE releases. Each op runs in its
+// own short transaction so the row is committed (and therefore visible to other
+// attachments) immediately, and the long-lived data transaction is never
+// touched. The key is an FNV-1a hash of the logical lock name, bounded to 16
+// hex chars so it always fits the index and needs no escaping.
+
+constexpr int kFbDuplicateKeySqlCode = -803;  // duplicate value in unique index
+constexpr int kFbTableExistsSqlCode  = -607;  // metadata: object already exists
+
+std::string fb_hash_key(const std::string& s) {
+    std::uint64_t h = 1469598103934665603ULL;       // FNV-1a 64-bit
+    for (unsigned char c : s) { h ^= c; h *= 1099511628211ULL; }
+    static const char* hex = "0123456789abcdef";
+    char buf[17];
+    for (int i = 15; i >= 0; --i) { buf[i] = hex[h & 0xF]; h >>= 4; }
+    return std::string(buf, 16);
+}
+
+std::string fb_record_lock_key(const FirebirdTable& tbl, std::size_t pos) {
+    std::string k = "R\x1f" + tbl.name;
+    if (pos < tbl.pk_snapshot.size()) {
+        for (const std::string& v : tbl.pk_snapshot[pos].values) k += "\x1f" + v;
+    }
+    return fb_hash_key(k);
+}
+
+std::string fb_table_lock_key(const FirebirdTable& tbl) {
+    return fb_hash_key("T\x1f" + tbl.name);
+}
+
+// Create OPENADS$LOCKS if absent. Idempotent and race-safe: a concurrent
+// attachment that already created it surfaces as -607, which we accept.
+util::Result<void> fb_ensure_lock_table(isc_db_handle* db) {
+    isc_tr_handle tr = 0;
+    if (auto t = start_tx(db, &tr); !t) return t.error();
+    ISC_STATUS_ARRAY st;
+    isc_dsql_execute_immediate(
+        st, db, &tr, 0,
+        "CREATE TABLE OPENADS$LOCKS ("
+        "LOCK_KEY VARCHAR(16) CHARACTER SET OCTETS NOT NULL PRIMARY KEY)",
+        kSqlDialect, nullptr);
+    if (status_failed(st)) {
+        const ISC_LONG code = isc_sqlcode(st);
+        ISC_STATUS_ARRAY s2;
+        isc_rollback_transaction(s2, &tr);
+        if (code == kFbTableExistsSqlCode) return util::Result<void>{};
+        return fb_error("firebird create lock table", st);
+    }
+    isc_commit_transaction(st, &tr);
+    if (status_failed(st)) return fb_error("firebird commit lock table", st);
+    return util::Result<void>{};
+}
+
+// Returns true when the key was acquired, false when another attachment holds
+// it (duplicate-key), or an error for anything else. `key` is hex, so it embeds
+// in the statement literal with no escaping.
+util::Result<bool> fb_lock_insert(isc_db_handle* db, const std::string& key) {
+    isc_tr_handle tr = 0;
+    if (auto t = start_tx(db, &tr); !t) return t.error();
+    const std::string sql =
+        "INSERT INTO OPENADS$LOCKS (LOCK_KEY) VALUES ('" + key + "')";
+    ISC_STATUS_ARRAY st;
+    isc_dsql_execute_immediate(st, db, &tr, 0, sql.c_str(), kSqlDialect, nullptr);
+    if (status_failed(st)) {
+        const ISC_LONG code = isc_sqlcode(st);
+        ISC_STATUS_ARRAY s2;
+        isc_rollback_transaction(s2, &tr);
+        if (code == kFbDuplicateKeySqlCode) return false;  // already locked
+        return fb_error("firebird lock insert", st);
+    }
+    isc_commit_transaction(st, &tr);
+    if (status_failed(st)) return fb_error("firebird lock commit", st);
+    return true;
+}
+
+util::Result<void> fb_lock_delete(isc_db_handle* db, const std::string& key) {
+    isc_tr_handle tr = 0;
+    if (auto t = start_tx(db, &tr); !t) return t.error();
+    const std::string sql =
+        "DELETE FROM OPENADS$LOCKS WHERE LOCK_KEY = '" + key + "'";
+    ISC_STATUS_ARRAY st;
+    isc_dsql_execute_immediate(st, db, &tr, 0, sql.c_str(), kSqlDialect, nullptr);
+    if (status_failed(st)) {
+        auto e = fb_error("firebird unlock delete", st);
+        ISC_STATUS_ARRAY s2;
+        isc_rollback_transaction(s2, &tr);
+        return e;
+    }
+    isc_commit_transaction(st, &tr);
+    if (status_failed(st)) return fb_error("firebird unlock commit", st);
+    return util::Result<void>{};
+}
+
 } // namespace
 
 util::Result<FirebirdConnection> FirebirdConnection::open(const FirebirdUri& uri) {
@@ -518,6 +619,15 @@ util::Result<FirebirdConnection> FirebirdConnection::open(const FirebirdUri& uri
 void FirebirdConnection::disconnect() noexcept {
     if (!impl_) return;
     std::lock_guard<std::mutex> lk(impl_->mu);
+    // Release any locks this connection still holds so they do not orphan in
+    // OPENADS$LOCKS (best-effort: a hard crash cannot run this, advisory-lock
+    // backends auto-release on session end where Firebird cannot).
+    if (impl_->db) {
+        for (const std::string& key : impl_->held_locks) {
+            fb_lock_delete(&impl_->db, key);
+        }
+        impl_->held_locks.clear();
+    }
     ISC_STATUS_ARRAY st;
     if (impl_->tr) {
         isc_commit_transaction(st, &impl_->tr);
@@ -1100,6 +1210,78 @@ util::Result<void> FirebirdConnection::delete_record(FirebirdTable* tbl) {
     tbl->rec_count_cached = true;
     tbl->pos              = tbl->cached_rec_count;
     tbl->current_recno    = 0;
+    return util::Result<void>{};
+}
+
+util::Result<void> FirebirdConnection::lock_record(FirebirdTable* tbl,
+                                                   std::uint32_t recno) {
+    if (!impl_) return util::Error{5001, 0, "invalid firebird lock", ""};
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid firebird lock", ""};
+    }
+    const std::size_t pos =
+        (recno == 0) ? tbl->pos : static_cast<std::size_t>(recno - 1);
+    if (pos >= tbl->pk_snapshot.size()) {
+        return util::Error{5026, 0, "no current record", ""};
+    }
+    if (!impl_->lock_table_ready) {
+        if (auto e = fb_ensure_lock_table(&impl_->db); !e) return e.error();
+        impl_->lock_table_ready = true;
+    }
+    const std::string key = fb_record_lock_key(*tbl, pos);
+    auto r = fb_lock_insert(&impl_->db, key);
+    if (!r) return r.error();
+    if (!r.value()) return util::Error{5035, 0, "record locked", ""};
+    impl_->held_locks.insert(key);
+    return util::Result<void>{};
+}
+
+util::Result<void> FirebirdConnection::unlock_record(FirebirdTable* tbl,
+                                                     std::uint32_t recno) {
+    if (!impl_) return util::Error{5001, 0, "invalid firebird unlock", ""};
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid firebird unlock", ""};
+    }
+    const std::size_t pos =
+        (recno == 0) ? tbl->pos : static_cast<std::size_t>(recno - 1);
+    if (pos >= tbl->pk_snapshot.size()) return util::Result<void>{};
+    const std::string key = fb_record_lock_key(*tbl, pos);
+    auto r = fb_lock_delete(&impl_->db, key);
+    if (!r) return r.error();
+    impl_->held_locks.erase(key);
+    return util::Result<void>{};
+}
+
+util::Result<void> FirebirdConnection::lock_table(FirebirdTable* tbl) {
+    if (!impl_) return util::Error{5001, 0, "invalid firebird lock", ""};
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid firebird lock", ""};
+    }
+    if (!impl_->lock_table_ready) {
+        if (auto e = fb_ensure_lock_table(&impl_->db); !e) return e.error();
+        impl_->lock_table_ready = true;
+    }
+    const std::string key = fb_table_lock_key(*tbl);
+    auto r = fb_lock_insert(&impl_->db, key);
+    if (!r) return r.error();
+    if (!r.value()) return util::Error{5035, 0, "table locked", ""};
+    impl_->held_locks.insert(key);
+    return util::Result<void>{};
+}
+
+util::Result<void> FirebirdConnection::unlock_table(FirebirdTable* tbl) {
+    if (!impl_) return util::Error{5001, 0, "invalid firebird unlock", ""};
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid firebird unlock", ""};
+    }
+    const std::string key = fb_table_lock_key(*tbl);
+    auto r = fb_lock_delete(&impl_->db, key);
+    if (!r) return r.error();
+    impl_->held_locks.erase(key);
     return util::Result<void>{};
 }
 

@@ -37,6 +37,35 @@ std::string rtrim(std::string s) {
     return s;
 }
 
+// SQL LIKE: % = any sequence, _ = one char (same semantics as M10.33).
+bool sql_like_match(const std::string& s, const std::string& pat) {
+    std::size_t si = 0, pi = 0;
+    std::size_t star = std::string::npos, ss = 0;
+    while (si < s.size()) {
+        if (pi < pat.size() &&
+            (pat[pi] == '_' || pat[pi] == s[si])) {
+            ++si; ++pi;
+        } else if (pi < pat.size() && pat[pi] == '%') {
+            star = pi++;
+            ss   = si;
+        } else if (star != std::string::npos) {
+            pi = star + 1;
+            si = ++ss;
+        } else {
+            return false;
+        }
+    }
+    while (pi < pat.size() && pat[pi] == '%') ++pi;
+    return pi == pat.size();
+}
+
+std::string value_as_string(const Value& lit) {
+    if (auto p = std::get_if<std::string>(&lit)) return *p;
+    if (auto p = std::get_if<std::int64_t>(&lit)) return std::to_string(*p);
+    if (auto p = std::get_if<double>(&lit))      return std::to_string(*p);
+    return {};
+}
+
 // Compare a decoded field value against a literal Value. Returns -1
 // / 0 / +1 like strcmp. Coerces both sides into the field's
 // "natural" domain (string for C/M, double for N/F/I/B/Y/D, bool
@@ -128,6 +157,14 @@ bool eval_leaf(const Leaf& leaf, Table& t) {
                 if (cmp_field_to_literal(fld, v, lit) == 0) return true;
             }
             return false;
+        case Op::Like:
+            if (leaf.values.empty()) return false;
+            return sql_like_match(rtrim(v.as_string),
+                                  value_as_string(leaf.values[0]));
+        case Op::IsNull:
+            return v.is_null;
+        case Op::IsNotNull:
+            return !v.is_null;
     }
     return false;
 }
@@ -412,6 +449,11 @@ serve_leaf_via_index(const Leaf& leaf, Table& t) {
                 }
                 return util::Result<Bitmap>{std::move(bm)};
             }
+        case Op::Like:
+        case Op::IsNull:
+        case Op::IsNotNull:
+            // V2 predicates — no index-range shortcut; caller full-scans.
+            return std::nullopt;
     }
     return std::nullopt;
 }

@@ -12,11 +12,16 @@ extern "C" {
 
 // SAP-shipped ace.h tags every public function with ENTRYPOINT, which
 // expands to platform-specific calling-convention + import/export
-// attributes. OpenADS uses plain C linkage on every export so consumers
-// (Harbour's contrib/rddads, third-party Clipper apps) link the same
-// import library without picking up extra ABI baggage.
+// attributes. On x86 Windows, Harbour's contrib/rddads declares every
+// ACE API function with __stdcall (WINAPI) linkage, so ENTRYPOINT must
+// match to avoid stack corruption. On x64 (single convention) this is
+// a no-op, and on non-Windows platforms it is left empty.
 #ifndef ENTRYPOINT
-#  define ENTRYPOINT
+#  if defined(_WIN32) && !defined(_WIN64)
+#    define ENTRYPOINT __stdcall
+#  else
+#    define ENTRYPOINT
+#  endif
 #endif
 
 typedef uint8_t  UNSIGNED8;
@@ -36,12 +41,12 @@ typedef uint64_t ADSHANDLE;
 #define ADS_LOCAL_SERVER  1
 #define ADS_REMOTE_SERVER 2
 
-UNSIGNED32 AdsConnect60     (UNSIGNED8* pucServer, UNSIGNED16 usServerType,
+UNSIGNED32 ENTRYPOINT AdsConnect60     (UNSIGNED8* pucServer, UNSIGNED16 usServerType,
                               UNSIGNED8* pucUserName, UNSIGNED8* pucPassword,
                               UNSIGNED32 ulOptions, ADSHANDLE* phConnect);
-UNSIGNED32 AdsDisconnect    (ADSHANDLE hConnect);
+UNSIGNED32 ENTRYPOINT AdsDisconnect    (ADSHANDLE hConnect);
 
-UNSIGNED32 AdsOpenTable     (ADSHANDLE  hConnect,
+UNSIGNED32 ENTRYPOINT AdsOpenTable     (ADSHANDLE  hConnect,
                               UNSIGNED8* pucName,
                               UNSIGNED8* pucAlias,
                               UNSIGNED16 usTableType,
@@ -50,37 +55,37 @@ UNSIGNED32 AdsOpenTable     (ADSHANDLE  hConnect,
                               UNSIGNED16 usCheckRights,
                               UNSIGNED16 usMode,
                               ADSHANDLE* phTable);
-UNSIGNED32 AdsCloseTable    (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsCloseTable    (ADSHANDLE hTable);
 
-UNSIGNED32 AdsGotoTop       (ADSHANDLE hTable);
-UNSIGNED32 AdsGotoBottom    (ADSHANDLE hTable);
-UNSIGNED32 AdsGotoRecord    (ADSHANDLE hTable, UNSIGNED32 ulRecord);
+UNSIGNED32 ENTRYPOINT AdsGotoTop       (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsGotoBottom    (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsGotoRecord    (ADSHANDLE hTable, UNSIGNED32 ulRecord);
 
-UNSIGNED32 AdsGetTableType  (ADSHANDLE hTable, UNSIGNED16* pusType);
-UNSIGNED32 AdsGetTableFilename(ADSHANDLE  hTable, UNSIGNED16 usOption,
+UNSIGNED32 ENTRYPOINT AdsGetTableType  (ADSHANDLE hTable, UNSIGNED16* pusType);
+UNSIGNED32 ENTRYPOINT AdsGetTableFilename(ADSHANDLE  hTable, UNSIGNED16 usOption,
                               UNSIGNED8* pucBuf, UNSIGNED16* pusLen);
 
-UNSIGNED32 AdsCheckExistence(ADSHANDLE  hConnect, UNSIGNED8* pucName,
+UNSIGNED32 ENTRYPOINT AdsCheckExistence(ADSHANDLE  hConnect, UNSIGNED8* pucName,
                               UNSIGNED16* pbExists);
-UNSIGNED32 AdsDeleteFile    (ADSHANDLE  hConnect, UNSIGNED8* pucName);
-UNSIGNED32 AdsCloseAllTables(void);
-UNSIGNED32 AdsGetRecordLength(ADSHANDLE hTable, UNSIGNED32* pulLen);
+UNSIGNED32 ENTRYPOINT AdsDeleteFile    (ADSHANDLE  hConnect, UNSIGNED8* pucName);
+UNSIGNED32 ENTRYPOINT AdsCloseAllTables(void);
+UNSIGNED32 ENTRYPOINT AdsGetRecordLength(ADSHANDLE hTable, UNSIGNED32* pulLen);
 
-UNSIGNED32 AdsRefreshRecord (ADSHANDLE hTable);
-UNSIGNED32 AdsReindex       (ADSHANDLE hTable);
-UNSIGNED32 AdsCopyTable     (ADSHANDLE  hHandle, UNSIGNED16 usFilterOption,
+UNSIGNED32 ENTRYPOINT AdsRefreshRecord (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsReindex       (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsCopyTable     (ADSHANDLE  hHandle, UNSIGNED16 usFilterOption,
                               UNSIGNED8* pucFile);
 UNSIGNED32 ENTRYPOINT AdsCopyTableContents(ADSHANDLE hSrc, ADSHANDLE hDst,
                               UNSIGNED16 usFilterOption);
-UNSIGNED32 AdsConvertTable  (ADSHANDLE  hHandle, UNSIGNED16 usFilterOption,
+UNSIGNED32 ENTRYPOINT AdsConvertTable  (ADSHANDLE  hHandle, UNSIGNED16 usFilterOption,
                               UNSIGNED8* pucFile, UNSIGNED16 usTargetType);
-UNSIGNED32 AdsFTSSearch     (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsFTSSearch     (ADSHANDLE   hConnect,
                               UNSIGNED8*  pucFile,
                               UNSIGNED8*  pucQuery,
                               UNSIGNED32* paRecnos,
                               UNSIGNED32* pulCount);
 
-UNSIGNED32 AdsCreateFTSIndex(ADSHANDLE   hTable,
+UNSIGNED32 ENTRYPOINT AdsCreateFTSIndex(ADSHANDLE   hTable,
                               UNSIGNED8*  pucFileName,
                               UNSIGNED8*  pucTag,
                               UNSIGNED8*  pucField,
@@ -99,61 +104,61 @@ UNSIGNED32 AdsCreateFTSIndex(ADSHANDLE   hTable,
                               UNSIGNED8*  pucReserved2,
                               UNSIGNED32  ulOptions);
 
-UNSIGNED32 AdsCreateIndex61 (ADSHANDLE  hTable, UNSIGNED8* pucFileName,
+UNSIGNED32 ENTRYPOINT AdsCreateIndex61 (ADSHANDLE  hTable, UNSIGNED8* pucFileName,
                               UNSIGNED8* pucIndexName, UNSIGNED8* pucExpr,
                               UNSIGNED8* pucCondition, UNSIGNED8* pucKeyFilter,
                               UNSIGNED32 ulOptions, UNSIGNED16 usPageSize,
                               ADSHANDLE* phIndex);
-UNSIGNED32 AdsExtractKey    (ADSHANDLE hIndex, UNSIGNED8* pucBuf,
+UNSIGNED32 ENTRYPOINT AdsExtractKey    (ADSHANDLE hIndex, UNSIGNED8* pucBuf,
                               UNSIGNED16* pusLen);
 
-UNSIGNED32 AdsAddCustomKey   (ADSHANDLE hIndex);
-UNSIGNED32 AdsDeleteCustomKey(ADSHANDLE hIndex);
+UNSIGNED32 ENTRYPOINT AdsAddCustomKey   (ADSHANDLE hIndex);
+UNSIGNED32 ENTRYPOINT AdsDeleteCustomKey(ADSHANDLE hIndex);
 
-UNSIGNED32 AdsGetLongLong   (ADSHANDLE hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsGetLongLong   (ADSHANDLE hTable, UNSIGNED8* pucField,
                               int64_t* pllValue);
-UNSIGNED32 AdsSetFieldRaw   (ADSHANDLE hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsSetFieldRaw   (ADSHANDLE hTable, UNSIGNED8* pucField,
                               UNSIGNED8* pucBuf, UNSIGNED32 ulLen);
-UNSIGNED32 AdsVerifySQL     (ADSHANDLE  hStatement, UNSIGNED8* pucSQL);
-UNSIGNED32 AdsFailedTransactionRecovery(UNSIGNED8* pucServer);
-UNSIGNED32 AdsGetAllLocks   (ADSHANDLE hTable, UNSIGNED32* paRecnos,
+UNSIGNED32 ENTRYPOINT AdsVerifySQL     (ADSHANDLE  hStatement, UNSIGNED8* pucSQL);
+UNSIGNED32 ENTRYPOINT AdsFailedTransactionRecovery(UNSIGNED8* pucServer);
+UNSIGNED32 ENTRYPOINT AdsGetAllLocks   (ADSHANDLE hTable, UNSIGNED32* paRecnos,
                               UNSIGNED16* pusCount);
-UNSIGNED32 AdsSkipUnique    (ADSHANDLE hIndex, SIGNED32 lDirection);
+UNSIGNED32 ENTRYPOINT AdsSkipUnique    (ADSHANDLE hIndex, SIGNED32 lDirection);
 
-UNSIGNED32 AdsCreateTable   (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+UNSIGNED32 ENTRYPOINT AdsCreateTable   (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                               UNSIGNED8* pucAlias,
                               UNSIGNED16 usTableType, UNSIGNED16 usCharType,
                               UNSIGNED16 usLockType, UNSIGNED16 usCheckRights,
                               UNSIGNED16 usMemoBlockSize,
                               UNSIGNED8* pucFields,
                               ADSHANDLE* phTable);
-UNSIGNED32 AdsRestructureTable(ADSHANDLE  hConnect, UNSIGNED8* pucTableName,
+UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE  hConnect, UNSIGNED8* pucTableName,
                               UNSIGNED8* pucAlias,
                               UNSIGNED16 usFileType, UNSIGNED16 usCharType,
                               UNSIGNED16 usLockType, UNSIGNED16 usCheckRights,
                               UNSIGNED8* pucAddFields,
                               UNSIGNED8* pucDeleteFields,
                               UNSIGNED8* pucChangeFields);
-UNSIGNED32 AdsSkip          (ADSHANDLE hTable, SIGNED32 lRows);
-UNSIGNED32 AdsAtEOF         (ADSHANDLE hTable, UNSIGNED16* pbAtEnd);
-UNSIGNED32 AdsAtBOF         (ADSHANDLE hTable, UNSIGNED16* pbAtBegin);
+UNSIGNED32 ENTRYPOINT AdsSkip          (ADSHANDLE hTable, SIGNED32 lRows);
+UNSIGNED32 ENTRYPOINT AdsAtEOF         (ADSHANDLE hTable, UNSIGNED16* pbAtEnd);
+UNSIGNED32 ENTRYPOINT AdsAtBOF         (ADSHANDLE hTable, UNSIGNED16* pbAtBegin);
 
-UNSIGNED32 AdsGetField      (ADSHANDLE  hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsGetField      (ADSHANDLE  hTable, UNSIGNED8* pucField,
                               UNSIGNED8* pucBuf, UNSIGNED32* pulLen,
                               UNSIGNED16 usOption);
-UNSIGNED32 AdsGetFieldName  (ADSHANDLE  hTable, UNSIGNED16 usFieldNum,
+UNSIGNED32 ENTRYPOINT AdsGetFieldName  (ADSHANDLE  hTable, UNSIGNED16 usFieldNum,
                               UNSIGNED8* pucBuf, UNSIGNED16* pusLen);
-UNSIGNED32 AdsGetNumFields  (ADSHANDLE  hTable, UNSIGNED16* pusFields);
-UNSIGNED32 AdsGetFieldType  (ADSHANDLE  hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsGetNumFields  (ADSHANDLE  hTable, UNSIGNED16* pusFields);
+UNSIGNED32 ENTRYPOINT AdsGetFieldType  (ADSHANDLE  hTable, UNSIGNED8* pucField,
                               UNSIGNED16* pusType);
-UNSIGNED32 AdsGetFieldLength(ADSHANDLE  hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsGetFieldLength(ADSHANDLE  hTable, UNSIGNED8* pucField,
                               UNSIGNED32* pulLen);
-UNSIGNED32 AdsGetRecordNum  (ADSHANDLE  hTable, UNSIGNED16 bFilterOption,
+UNSIGNED32 ENTRYPOINT AdsGetRecordNum  (ADSHANDLE  hTable, UNSIGNED16 bFilterOption,
                               UNSIGNED32* pulRecordNum);
-UNSIGNED32 AdsGetRecordCount(ADSHANDLE  hTable, UNSIGNED16 bFilterOption,
+UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE  hTable, UNSIGNED16 bFilterOption,
                               UNSIGNED32* pulRecordCount);
 
-UNSIGNED32 AdsGetLastError  (UNSIGNED32* pulCode, UNSIGNED8* pucBuf,
+UNSIGNED32 ENTRYPOINT AdsGetLastError  (UNSIGNED32* pulCode, UNSIGNED8* pucBuf,
                               UNSIGNED16* pusBufLen);
 
 UNSIGNED32 ENTRYPOINT AdsGetVersion (UNSIGNED32* pulMajor,
@@ -162,20 +167,20 @@ UNSIGNED32 ENTRYPOINT AdsGetVersion (UNSIGNED32* pulMajor,
                               UNSIGNED8*  pucDesc,
                               UNSIGNED16* pusDescLen);
 
-UNSIGNED32 AdsGetServerName (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsGetServerName (ADSHANDLE   hConnect,
                               UNSIGNED8*  pucBuf, UNSIGNED16* pusLen);
-UNSIGNED32 AdsGetServerTime (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsGetServerTime (ADSHANDLE   hConnect,
                               UNSIGNED8*  pucDateBuf, UNSIGNED16* pusDateLen,
                               SIGNED32*   plTime,
                               UNSIGNED8*  pucTimeBuf, UNSIGNED16* pusTimeLen);
 
-UNSIGNED32 AdsAppendRecord  (ADSHANDLE hTable);
-UNSIGNED32 AdsWriteRecord   (ADSHANDLE hTable);
-UNSIGNED32 AdsDeleteRecord  (ADSHANDLE hTable);
-UNSIGNED32 AdsRecallRecord  (ADSHANDLE hTable);
-UNSIGNED32 AdsIsRecordDeleted(ADSHANDLE hTable, UNSIGNED16* pbDeleted);
+UNSIGNED32 ENTRYPOINT AdsAppendRecord  (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsWriteRecord   (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsDeleteRecord  (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsRecallRecord  (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsIsRecordDeleted(ADSHANDLE hTable, UNSIGNED16* pbDeleted);
 
-UNSIGNED32 AdsSetString     (ADSHANDLE hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsSetString     (ADSHANDLE hTable, UNSIGNED8* pucField,
                               UNSIGNED8* pucValue, UNSIGNED32 ulLen);
 UNSIGNED32 ENTRYPOINT AdsGetString (ADSHANDLE hTable, UNSIGNED8* pucField,
                               UNSIGNED8* pucBuf, UNSIGNED32* pulLen,
@@ -190,243 +195,244 @@ UNSIGNED32 ENTRYPOINT AdsGetLong   (ADSHANDLE hTable, UNSIGNED8* pucField,
 #ifndef ADSFIELD
 #  define ADSFIELD( n )  ( ( UNSIGNED8 * ) ( uintptr_t ) ( n ) )
 #endif
-UNSIGNED32 AdsSetStringW    (ADSHANDLE  hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsSetStringW    (ADSHANDLE  hTable, UNSIGNED8* pucField,
                               UNSIGNED16* pucValueW, UNSIGNED32 ulLen);
-UNSIGNED32 AdsGetStringW    (ADSHANDLE  hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsGetStringW    (ADSHANDLE  hTable, UNSIGNED8* pucField,
                               UNSIGNED16* pucBufW, UNSIGNED32* pulLenW,
                               UNSIGNED16 usOption);
-UNSIGNED32 AdsGetFieldW     (ADSHANDLE  hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsGetFieldW     (ADSHANDLE  hTable, UNSIGNED8* pucField,
                               UNSIGNED16* pucBufW, UNSIGNED32* pulLenW,
                               UNSIGNED16 usOption);
-UNSIGNED32 AdsSetLogical    (ADSHANDLE hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsSetLogical    (ADSHANDLE hTable, UNSIGNED8* pucField,
                               UNSIGNED16 bValue);
-UNSIGNED32 AdsSetDouble     (ADSHANDLE hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsSetDouble     (ADSHANDLE hTable, UNSIGNED8* pucField,
                               double dValue);
 
-UNSIGNED32 AdsLockRecord    (ADSHANDLE hTable, UNSIGNED32 ulRecord);
-UNSIGNED32 AdsUnlockRecord  (ADSHANDLE hTable, UNSIGNED32 ulRecord);
-UNSIGNED32 AdsLockTable     (ADSHANDLE hTable);
-UNSIGNED32 AdsUnlockTable   (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsLockRecord    (ADSHANDLE hTable, UNSIGNED32 ulRecord);
+UNSIGNED32 ENTRYPOINT AdsUnlockRecord  (ADSHANDLE hTable, UNSIGNED32 ulRecord);
+UNSIGNED32 ENTRYPOINT AdsLockTable     (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsUnlockTable   (ADSHANDLE hTable);
 
-UNSIGNED32 AdsSetLockCycle      (ADSHANDLE hConnect, UNSIGNED32 ulCycle);
-UNSIGNED32 AdsGetLockCycle      (ADSHANDLE hConnect, UNSIGNED32* pulCycle);
-UNSIGNED32 AdsSetLockRetryCount (ADSHANDLE hConnect, UNSIGNED16 usRetryCount);
-UNSIGNED32 AdsGetLockRetryCount (ADSHANDLE hConnect, UNSIGNED16* pusRetryCount);
+UNSIGNED32 ENTRYPOINT AdsSetLockCycle      (ADSHANDLE hConnect, UNSIGNED32 ulCycle);
+UNSIGNED32 ENTRYPOINT AdsGetLockCycle      (ADSHANDLE hConnect, UNSIGNED32* pulCycle);
+UNSIGNED32 ENTRYPOINT AdsSetLockRetryCount (ADSHANDLE hConnect, UNSIGNED16 usRetryCount);
+UNSIGNED32 ENTRYPOINT AdsGetLockRetryCount (ADSHANDLE hConnect, UNSIGNED16* pusRetryCount);
 
-UNSIGNED32 AdsFlushFileBuffers(ADSHANDLE hTable);
-UNSIGNED32 AdsSetDeferredFlush(ADSHANDLE hTable, UNSIGNED16 usDeferred);
+UNSIGNED32 ENTRYPOINT AdsFlushFileBuffers(ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsSetDeferredFlush(ADSHANDLE hTable, UNSIGNED16 usDeferred);
 
-UNSIGNED32 AdsOpenIndex     (ADSHANDLE hTable, UNSIGNED8* pucName,
+UNSIGNED32 ENTRYPOINT AdsOpenIndex     (ADSHANDLE hTable, UNSIGNED8* pucName,
                               ADSHANDLE* ahIndex,
                               UNSIGNED16* pu16ArrayLen);
-UNSIGNED32 AdsCloseIndex    (ADSHANDLE hIndex);
-UNSIGNED32 AdsCloseAllIndexes(ADSHANDLE hTable);
-UNSIGNED32 AdsCreateIndex   (ADSHANDLE hTable, UNSIGNED8* pucFile,
+UNSIGNED32 ENTRYPOINT AdsCloseIndex    (ADSHANDLE hIndex);
+UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsCreateIndex   (ADSHANDLE hTable, UNSIGNED8* pucFile,
                               UNSIGNED8* pucTag, UNSIGNED8* pucExpr,
                               UNSIGNED8* pucCondition, UNSIGNED32 ulOptions,
                               UNSIGNED16 usKeyType, ADSHANDLE* phIndex);
-UNSIGNED32 AdsDeleteIndex   (ADSHANDLE hIndex);
-UNSIGNED32 AdsGetNumIndexes (ADSHANDLE hTable, UNSIGNED16* pusCount);
-UNSIGNED32 AdsGetIndexHandle(ADSHANDLE hTable, UNSIGNED8* pucName,
+UNSIGNED32 ENTRYPOINT AdsDeleteIndex   (ADSHANDLE hIndex);
+UNSIGNED32 ENTRYPOINT AdsGetNumIndexes (ADSHANDLE hTable, UNSIGNED16* pusCount);
+UNSIGNED32 ENTRYPOINT AdsGetIndexHandle(ADSHANDLE hTable, UNSIGNED8* pucName,
                               ADSHANDLE* phIndex);
-UNSIGNED32 AdsGetIndexHandleByOrder(ADSHANDLE hTable, UNSIGNED16 usOrder,
+UNSIGNED32 ENTRYPOINT AdsGetIndexHandleByOrder(ADSHANDLE hTable, UNSIGNED16 usOrder,
                                     ADSHANDLE* phIndex);
-UNSIGNED32 AdsGetIndexExpr  (ADSHANDLE hIndex, UNSIGNED8* pucBuf,
+UNSIGNED32 ENTRYPOINT AdsGetIndexExpr  (ADSHANDLE hIndex, UNSIGNED8* pucBuf,
                               UNSIGNED16* pusBufLen);
-UNSIGNED32 AdsGetIndexName  (ADSHANDLE hIndex, UNSIGNED8* pucBuf,
+UNSIGNED32 ENTRYPOINT AdsGetIndexName  (ADSHANDLE hIndex, UNSIGNED8* pucBuf,
                               UNSIGNED16* pusBufLen);
-UNSIGNED32 AdsSetIndexDirection(ADSHANDLE hIndex, UNSIGNED16 usDir);
+UNSIGNED32 ENTRYPOINT AdsSetIndexDirection(ADSHANDLE hIndex, UNSIGNED16 usDir);
 
-UNSIGNED32 AdsSeek          (ADSHANDLE hIndex, UNSIGNED8* pucKey,
+UNSIGNED32 ENTRYPOINT AdsSeek          (ADSHANDLE hIndex, UNSIGNED8* pucKey,
                               UNSIGNED16 usKeyLen, UNSIGNED16 usKeyType,
                               UNSIGNED16 usSeekType, UNSIGNED16* pbFound);
-UNSIGNED32 AdsSeekLast      (ADSHANDLE hIndex, UNSIGNED8* pucKey,
+UNSIGNED32 ENTRYPOINT AdsSeekLast      (ADSHANDLE hIndex, UNSIGNED8* pucKey,
                               UNSIGNED16 usKeyLen, UNSIGNED16 usKeyType,
                               UNSIGNED16* pbFound);
 
 UNSIGNED32 ENTRYPOINT AdsSetScope (ADSHANDLE hIndex, UNSIGNED16 usScope,
                               UNSIGNED8* pucScope, UNSIGNED16 usLen,
                               UNSIGNED16 usDataType);
-UNSIGNED32 AdsClearScope    (ADSHANDLE hIndex, UNSIGNED16 usScope);
-UNSIGNED32 AdsGetScope      (ADSHANDLE hIndex, UNSIGNED16 usScope,
+UNSIGNED32 ENTRYPOINT AdsClearScope    (ADSHANDLE hIndex, UNSIGNED16 usScope);
+UNSIGNED32 ENTRYPOINT AdsGetScope      (ADSHANDLE hIndex, UNSIGNED16 usScope,
                               UNSIGNED8* pucBuf, UNSIGNED16* pusLen);
 
-UNSIGNED32 AdsPackTable     (ADSHANDLE hTable);
-UNSIGNED32 AdsZapTable      (ADSHANDLE hTable);
-UNSIGNED32 AdsSetAOF        (ADSHANDLE hTable, UNSIGNED8* pucCondition,
+UNSIGNED32 ENTRYPOINT AdsPackTable     (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsZapTable      (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsSetAOF        (ADSHANDLE hTable, UNSIGNED8* pucCondition,
                               UNSIGNED16 usResolve);
-UNSIGNED32 AdsGetAOFOptLevel(ADSHANDLE hTable, UNSIGNED16* pusLevel,
+UNSIGNED32 ENTRYPOINT AdsGetAOFOptLevel(ADSHANDLE hTable, UNSIGNED16* pusLevel,
                               UNSIGNED8* pucBuf, UNSIGNED16* pusLen);
-UNSIGNED32 AdsClearAOF      (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsClearAOF      (ADSHANDLE hTable);
 
-UNSIGNED32 AdsGetMemoLength    (ADSHANDLE hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsGetMemoLength    (ADSHANDLE hTable, UNSIGNED8* pucField,
                                  UNSIGNED32* pulLen);
-UNSIGNED32 AdsGetMemoDataType  (ADSHANDLE hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsGetMemoDataType  (ADSHANDLE hTable, UNSIGNED8* pucField,
                                  UNSIGNED16* pusType);
-UNSIGNED32 AdsBinaryToFile     (ADSHANDLE hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsBinaryToFile     (ADSHANDLE hTable, UNSIGNED8* pucField,
                                  UNSIGNED8* pucPath);
-UNSIGNED32 AdsFileToBinary     (ADSHANDLE hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsFileToBinary     (ADSHANDLE hTable, UNSIGNED8* pucField,
                                  UNSIGNED16 usType, UNSIGNED8* pucPath);
-UNSIGNED32 AdsGetBinaryLength  (ADSHANDLE hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsGetBinaryLength  (ADSHANDLE hTable, UNSIGNED8* pucField,
                                  UNSIGNED32* pulLength);
-UNSIGNED32 AdsGetBinary        (ADSHANDLE hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsGetBinary        (ADSHANDLE hTable, UNSIGNED8* pucField,
                                  UNSIGNED32 ulOffset, UNSIGNED8* pucBuf,
                                  UNSIGNED32* pulLen);
-UNSIGNED32 AdsSetBinary        (ADSHANDLE hTable, UNSIGNED8* pucField,
+UNSIGNED32 ENTRYPOINT AdsSetBinary        (ADSHANDLE hTable, UNSIGNED8* pucField,
                                  UNSIGNED16 usBinaryType,
                                  UNSIGNED32 ulTotalBytes,
                                  UNSIGNED32 ulOffset,
                                  UNSIGNED8* pucBuf, UNSIGNED32 ulBytes);
-UNSIGNED32 AdsGetLastAutoinc   (ADSHANDLE hTable, UNSIGNED32* pulValue);
+UNSIGNED32 ENTRYPOINT AdsGetLastAutoinc   (ADSHANDLE hTable, UNSIGNED32* pulValue);
 
-UNSIGNED32 AdsEnableEncryption (ADSHANDLE hConnect, UNSIGNED8* pucPassword);
-UNSIGNED32 AdsDisableEncryption(ADSHANDLE hConnect);
-UNSIGNED32 AdsIsEncryptionEnabled(ADSHANDLE hConnect, UNSIGNED16* pbEnabled);
-UNSIGNED32 AdsIsTableEncrypted (ADSHANDLE hTable, UNSIGNED16* pbEncrypted);
-UNSIGNED32 AdsIsRecordEncrypted(ADSHANDLE hTable, UNSIGNED16* pbEncrypted);
-UNSIGNED32 AdsEncryptTable     (ADSHANDLE hTable);
-UNSIGNED32 AdsDecryptTable     (ADSHANDLE hTable);
-UNSIGNED32 AdsEncryptRecord    (ADSHANDLE hTable);
-UNSIGNED32 AdsDecryptRecord    (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsEnableEncryption (ADSHANDLE hConnect, UNSIGNED8* pucPassword);
+UNSIGNED32 ENTRYPOINT AdsDisableEncryption(ADSHANDLE hConnect);
+UNSIGNED32 ENTRYPOINT AdsIsEncryptionEnabled(ADSHANDLE hConnect, UNSIGNED16* pbEnabled);
+UNSIGNED32 ENTRYPOINT AdsIsTableEncrypted (ADSHANDLE hTable, UNSIGNED16* pbEncrypted);
+UNSIGNED32 ENTRYPOINT AdsIsRecordEncrypted(ADSHANDLE hTable, UNSIGNED16* pbEncrypted);
+UNSIGNED32 ENTRYPOINT AdsEncryptTable     (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsDecryptTable     (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsEncryptRecord    (ADSHANDLE hTable);
+UNSIGNED32 ENTRYPOINT AdsDecryptRecord    (ADSHANDLE hTable);
 
-UNSIGNED32 AdsBeginTransaction   (ADSHANDLE hConnect);
-UNSIGNED32 AdsCommitTransaction  (ADSHANDLE hConnect);
-UNSIGNED32 AdsRollbackTransaction(ADSHANDLE hConnect);
-UNSIGNED32 AdsInTransaction      (ADSHANDLE hConnect, UNSIGNED16* pbInTx);
+UNSIGNED32 ENTRYPOINT AdsBeginTransaction   (ADSHANDLE hConnect);
+UNSIGNED32 ENTRYPOINT AdsCommitTransaction  (ADSHANDLE hConnect);
+UNSIGNED32 ENTRYPOINT AdsRollbackTransaction(ADSHANDLE hConnect);
+UNSIGNED32 ENTRYPOINT AdsInTransaction      (ADSHANDLE hConnect, UNSIGNED16* pbInTx);
+UNSIGNED32 ENTRYPOINT AdsSetAutoCommit      (ADSHANDLE hConnect, SIGNED32 nThreshold);
 
 UNSIGNED32 ENTRYPOINT AdsCreateSavepoint    (ADSHANDLE hConnect, UNSIGNED8* pucName,
                               UNSIGNED32 ulOptions);
 UNSIGNED32 ENTRYPOINT AdsReleaseSavepoint   (ADSHANDLE hConnect, UNSIGNED8* pucName);
-UNSIGNED32 AdsSetEncryptionPassword(ADSHANDLE hConnect, UNSIGNED8* pucPassword);
-UNSIGNED32 AdsSetCollation       (ADSHANDLE hConnect, UNSIGNED8* pucName);
-UNSIGNED32 AdsConvertOemToAnsi   (UNSIGNED8* pucBuf, UNSIGNED32* pulLen);
-UNSIGNED32 AdsConvertAnsiToOem   (UNSIGNED8* pucBuf, UNSIGNED32* pulLen);
+UNSIGNED32 ENTRYPOINT AdsSetEncryptionPassword(ADSHANDLE hConnect, UNSIGNED8* pucPassword);
+UNSIGNED32 ENTRYPOINT AdsSetCollation       (ADSHANDLE hConnect, UNSIGNED8* pucName);
+UNSIGNED32 ENTRYPOINT AdsConvertOemToAnsi   (UNSIGNED8* pucBuf, UNSIGNED32* pulLen);
+UNSIGNED32 ENTRYPOINT AdsConvertAnsiToOem   (UNSIGNED8* pucBuf, UNSIGNED32* pulLen);
 UNSIGNED32 ENTRYPOINT AdsRollbackTransaction80(ADSHANDLE hConnect, UNSIGNED8* pucSavepoint,
                               UNSIGNED32 ulOptions);
 
-UNSIGNED32 AdsFindFirstTable     (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsFindFirstTable     (ADSHANDLE   hConnect,
                                   UNSIGNED8*  pucMask,
                                   UNSIGNED8*  pucFileName,
                                   UNSIGNED16* pusFileNameLen,
                                   ADSHANDLE*  phFind);
-UNSIGNED32 AdsFindNextTable      (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsFindNextTable      (ADSHANDLE   hConnect,
                                   ADSHANDLE   hFind,
                                   UNSIGNED8*  pucFileName,
                                   UNSIGNED16* pusFileNameLen);
-UNSIGNED32 AdsFindClose          (ADSHANDLE hConnect, ADSHANDLE hFind);
+UNSIGNED32 ENTRYPOINT AdsFindClose          (ADSHANDLE hConnect, ADSHANDLE hFind);
 
-UNSIGNED32 AdsDDCreate               (UNSIGNED8*  pucDictionary,
+UNSIGNED32 ENTRYPOINT AdsDDCreate               (UNSIGNED8*  pucDictionary,
                                       UNSIGNED16  bEncrypt,
                                       UNSIGNED8*  pucAdminPassword,
                                       ADSHANDLE*  phConnect);
-UNSIGNED32 AdsDDAddTable             (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDAddTable             (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucAlias,
                                       UNSIGNED8*  pucTablePath,
                                       UNSIGNED16  usFileType,
                                       UNSIGNED16  usCharType,
                                       UNSIGNED8*  pucIndexPath,
                                       UNSIGNED8*  pucComment);
-UNSIGNED32 AdsDDRemoveTable          (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDRemoveTable          (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucAlias,
                                       UNSIGNED16  usDeleteFiles);
-UNSIGNED32 AdsDDSetDatabaseProperty  (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDSetDatabaseProperty  (ADSHANDLE   hConnect,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16  usPropertyLen);
-UNSIGNED32 AdsDDGetDatabaseProperty  (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDGetDatabaseProperty  (ADSHANDLE   hConnect,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16* pusPropertyLen);
-UNSIGNED32 AdsDDGetTableProperty     (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDGetTableProperty     (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucTableName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16* pusPropertyLen);
-UNSIGNED32 AdsDDSetTableProperty     (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDSetTableProperty     (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucTableName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16  usPropertyLen);
-UNSIGNED32 AdsDDGetFieldProperty     (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDGetFieldProperty     (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucTableName,
                                       UNSIGNED8*  pucFieldName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16* pusPropertyLen);
-UNSIGNED32 AdsDDSetFieldProperty     (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDSetFieldProperty     (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucTableName,
                                       UNSIGNED8*  pucFieldName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16  usPropertyLen);
-UNSIGNED32 AdsDDAddIndexFile         (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDAddIndexFile         (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucTableName,
                                       UNSIGNED8*  pucIndexFile,
                                       UNSIGNED8*  pucComment);
-UNSIGNED32 AdsDDRemoveIndexFile      (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDRemoveIndexFile      (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucTableName,
                                       UNSIGNED8*  pucIndexFile,
                                       UNSIGNED16  usDeleteFile);
-UNSIGNED32 AdsDDGetIndexProperty     (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDGetIndexProperty     (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucTableName,
                                       UNSIGNED8*  pucTagName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16* pusPropertyLen);
-UNSIGNED32 AdsDDSetIndexProperty     (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDSetIndexProperty     (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucTableName,
                                       UNSIGNED8*  pucTagName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16  usPropertyLen);
-UNSIGNED32 AdsDDCreateUser           (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDCreateUser           (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucGroup,
                                       UNSIGNED8*  pucUser,
                                       UNSIGNED8*  pucPassword,
                                       UNSIGNED8*  pucDescription);
-UNSIGNED32 AdsDDDeleteUser           (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDDeleteUser           (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucUser);
-UNSIGNED32 AdsDDGetUserProperty      (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDGetUserProperty      (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucUser,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16* pusPropertyLen);
-UNSIGNED32 AdsDDSetUserProperty      (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDSetUserProperty      (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucUser,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16  usPropertyLen);
-UNSIGNED32 AdsDDAddUserToGroup       (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDAddUserToGroup       (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucGroup,
                                       UNSIGNED8*  pucUser);
-UNSIGNED32 AdsDDRemoveUserFromGroup  (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDRemoveUserFromGroup  (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucGroup,
                                       UNSIGNED8*  pucUser);
-UNSIGNED32 AdsDDGetUserTableRights   (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDGetUserTableRights   (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucTableName,
                                       UNSIGNED8*  pucUser,
                                       UNSIGNED32* pulRights);
-UNSIGNED32 AdsDDSetUserTableRights   (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDSetUserTableRights   (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucTableName,
                                       UNSIGNED8*  pucUser,
                                       UNSIGNED32  ulRights);
-UNSIGNED32 AdsDDCreateView           (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDCreateView           (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED8*  pucComment,
                                       UNSIGNED8*  pucSQL);
-UNSIGNED32 AdsDDDropView             (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDDropView             (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName);
-UNSIGNED32 AdsDDGetViewProperty      (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDGetViewProperty      (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16* pusPropertyLen);
-UNSIGNED32 AdsDDSetViewProperty      (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDSetViewProperty      (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16  usPropertyLen);
-UNSIGNED32 AdsDDCreateProcedure      (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDCreateProcedure      (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED8*  pucContainer,
                                       UNSIGNED8*  pucProcName,
@@ -434,48 +440,48 @@ UNSIGNED32 AdsDDCreateProcedure      (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucInParams,
                                       UNSIGNED8*  pucOutParams,
                                       UNSIGNED8*  pucComments);
-UNSIGNED32 AdsDDDropProcedure        (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDDropProcedure        (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName);
-UNSIGNED32 AdsDDGetProcProperty      (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDGetProcProperty      (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16* pusPropertyLen);
-UNSIGNED32 AdsDDSetProcProperty      (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDSetProcProperty      (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16  usPropertyLen);
-UNSIGNED32 AdsDDCreateFunction         (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDCreateFunction         (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED8*  pucContainer,
                                       UNSIGNED8*  pucImplementation,
                                       UNSIGNED8*  pucRetType,
                                       UNSIGNED8*  pucInParams,
                                       UNSIGNED8*  pucComment);
-UNSIGNED32 AdsDDDropFunction           (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDDropFunction           (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName);
-UNSIGNED32 AdsDDGetFunctionProperty    (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDGetFunctionProperty    (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16* pusPropertyLen);
-UNSIGNED32 AdsDDSetFunctionProperty    (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDSetFunctionProperty    (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16  usPropertyLen);
-UNSIGNED32 AdsDDGetRefIntegrityProperty(ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDGetRefIntegrityProperty(ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16* pusPropertyLen);
-UNSIGNED32 AdsDDSetRefIntegrityProperty(ADSHANDLE  hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDSetRefIntegrityProperty(ADSHANDLE  hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16  usPropertyLen);
-UNSIGNED32 AdsDDCreateTrigger        (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDCreateTrigger        (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED8*  pucTable,
                                       UNSIGNED32  ulType,
@@ -483,20 +489,20 @@ UNSIGNED32 AdsDDCreateTrigger        (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucContainer,
                                       UNSIGNED8*  pucProcedure,
                                       UNSIGNED32  ulPriority);
-UNSIGNED32 AdsDDDropTrigger          (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDDropTrigger          (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName);
-UNSIGNED32 AdsDDGetTriggerProperty   (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDGetTriggerProperty   (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16* pusPropertyLen);
-UNSIGNED32 AdsDDSetTriggerProperty   (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDSetTriggerProperty   (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16  usPropertyLen);
 // SAP ACE API name aliases
-UNSIGNED32 AdsDDAddProcedure         (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDAddProcedure         (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED8*  pucContainer,
                                       UNSIGNED8*  pucProcName,
@@ -504,33 +510,33 @@ UNSIGNED32 AdsDDAddProcedure         (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucInParams,
                                       UNSIGNED8*  pucOutParams,
                                       UNSIGNED8*  pucComments);
-UNSIGNED32 AdsDDRemoveProcedure      (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDRemoveProcedure      (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName);
-UNSIGNED32 AdsDDGetProcedureProperty (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDGetProcedureProperty (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16* pusPropertyLen);
-UNSIGNED32 AdsDDSetProcedureProperty (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDSetProcedureProperty (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED16  usPropertyID,
                                       void*       pvProperty,
                                       UNSIGNED16  usPropertyLen);
-UNSIGNED32 AdsDDRemoveTrigger        (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDRemoveTrigger        (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName);
-UNSIGNED32 AdsDDFindFirstObject      (ADSHANDLE   hObject,
+UNSIGNED32 ENTRYPOINT AdsDDFindFirstObject      (ADSHANDLE   hObject,
                                       UNSIGNED16  usFindObjectType,
                                       UNSIGNED8*  pucParentName,
                                       UNSIGNED8*  pucObjectName,
                                       UNSIGNED16* pusObjectNameLen,
                                       ADSHANDLE*  phFindHandle);
-UNSIGNED32 AdsDDFindNextObject       (ADSHANDLE   hObject,
+UNSIGNED32 ENTRYPOINT AdsDDFindNextObject       (ADSHANDLE   hObject,
                                       ADSHANDLE   hFindHandle,
                                       UNSIGNED8*  pucObjectName,
                                       UNSIGNED16* pusObjectNameLen);
-UNSIGNED32 AdsDDFindClose            (ADSHANDLE   hObject,
+UNSIGNED32 ENTRYPOINT AdsDDFindClose            (ADSHANDLE   hObject,
                                       ADSHANDLE   hFindHandle);
-UNSIGNED32 AdsDDCreateRefIntegrity   (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDCreateRefIntegrity   (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName,
                                       UNSIGNED8*  pucFailTable,
                                       UNSIGNED8*  pucParent,
@@ -539,30 +545,30 @@ UNSIGNED32 AdsDDCreateRefIntegrity   (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucChildTag,
                                       UNSIGNED16  usUpdateOption,
                                       UNSIGNED16  usDeleteOption);
-UNSIGNED32 AdsDDRemoveRefIntegrity   (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDRemoveRefIntegrity   (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucName);
-UNSIGNED32 AdsDDCreateLink           (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDCreateLink           (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucAlias,
                                       UNSIGNED8*  pucPath,
                                       UNSIGNED8*  pucUser,
                                       UNSIGNED8*  pucPassword,
                                       UNSIGNED16  usOptions);
-UNSIGNED32 AdsDDDropLink             (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDDropLink             (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucAlias,
                                       UNSIGNED16  usOptions);
-UNSIGNED32 AdsDDModifyLink           (ADSHANDLE   hConnect,
+UNSIGNED32 ENTRYPOINT AdsDDModifyLink           (ADSHANDLE   hConnect,
                                       UNSIGNED8*  pucAlias,
                                       UNSIGNED8*  pucPath,
                                       UNSIGNED8*  pucUser,
                                       UNSIGNED8*  pucPassword,
                                       UNSIGNED16  usOptions);
 
-UNSIGNED32 AdsCreateSQLStatement (ADSHANDLE hConnect, ADSHANDLE* phStatement);
-UNSIGNED32 AdsCloseSQLStatement  (ADSHANDLE hStatement);
-UNSIGNED32 AdsPrepareSQL         (ADSHANDLE hStatement, UNSIGNED8* pucSQL);
-UNSIGNED32 AdsGetNumParams       (ADSHANDLE hStatement, UNSIGNED16* pusNumParams);
-UNSIGNED32 AdsExecuteSQL         (ADSHANDLE hStatement, ADSHANDLE* phCursor);
-UNSIGNED32 AdsExecuteSQLDirect   (ADSHANDLE hStatement, UNSIGNED8* pucSQL,
+UNSIGNED32 ENTRYPOINT AdsCreateSQLStatement (ADSHANDLE hConnect, ADSHANDLE* phStatement);
+UNSIGNED32 ENTRYPOINT AdsCloseSQLStatement  (ADSHANDLE hStatement);
+UNSIGNED32 ENTRYPOINT AdsPrepareSQL         (ADSHANDLE hStatement, UNSIGNED8* pucSQL);
+UNSIGNED32 ENTRYPOINT AdsGetNumParams       (ADSHANDLE hStatement, UNSIGNED16* pusNumParams);
+UNSIGNED32 ENTRYPOINT AdsExecuteSQL         (ADSHANDLE hStatement, ADSHANDLE* phCursor);
+UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect   (ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                   ADSHANDLE* phCursor);
 
 #define ADS_TOP            0
@@ -702,7 +708,8 @@ UNSIGNED32 AdsExecuteSQLDirect   (ADSHANDLE hStatement, UNSIGNED8* pucSQL,
 #define ADS_CHECKRIGHTS     1
 #define ADS_OPTIMIZED_FULL  1
 #define ADS_OPTIMIZED_PART  2
-#define ADS_AOF_ADD_RECORD  1
+#define ADS_AOF_ADD_RECORD     1
+#define ADS_AOF_REMOVE_RECORD  2
 
 // Handle classification (AdsGetHandleType).
 #define ADS_NONE              0
@@ -1811,6 +1818,73 @@ UNSIGNED32 ENTRYPOINT AdsSetTimeStamp     (ADSHANDLE hObj, UNSIGNED8* pucFldId,
                                            UNSIGNED8* pucBuf, UNSIGNED32 ulLen);
 UNSIGNED32 ENTRYPOINT AdsGetDate          (ADSHANDLE hObj, UNSIGNED8* pucFldId,
                                            UNSIGNED8* pucBuf, UNSIGNED16* pusLen);
+
+// ── Task 2: AdsFetchWhere result-set API ─────────────────────────────────────
+// Server-side filtered scan over the wire.  `AdsFetchWhere` sends `pszExpr`
+// (a Clipper-style FOR predicate) to the server and receives back a snapshot
+// batch of all matching rows, up to `ulMaxRows`.
+//
+// `pszCols`: comma-separated column names to include in each row
+//   (e.g. "NM,QTD").  NULL or empty string → no column data is returned
+//   (count / locate mode; use `AdsFetchWhereRows` for the match count).
+//
+// `ulFlags`: bit 0x01 (WANT_RECNO) → include per-row record numbers in the
+//   batch; retrieve them with `AdsFetchWhereRecno`.
+//
+// Returns an opaque result handle in `*phResult` on success.  The handle is
+// valid until `AdsFetchWhereClose` is called.  Row indices (`ulRow`) are
+// 0-based throughout.
+//
+// Non-remote (local) tables return AE_FUNCTION_NOT_AVAILABLE (5004) — the
+// caller should fall back to the classic client-side scan path.
+UNSIGNED32 ENTRYPOINT AdsFetchWhere      (ADSHANDLE  hTbl,
+                                          UNSIGNED8* pszExpr,
+                                          UNSIGNED8* pszCols,
+                                          UNSIGNED32 ulMaxRows,
+                                          UNSIGNED32 ulFlags,
+                                          ADSHANDLE* phResult);
+UNSIGNED32 ENTRYPOINT AdsFetchWhereRows  (ADSHANDLE hRes, UNSIGNED32* pulRows);
+UNSIGNED32 ENTRYPOINT AdsFetchWhereRecno (ADSHANDLE hRes, UNSIGNED32 ulRow,
+                                          UNSIGNED32* pulRec);
+UNSIGNED32 ENTRYPOINT AdsFetchWhereField (ADSHANDLE  hRes,
+                                          UNSIGNED32 ulRow,
+                                          UNSIGNED8* pszCol,
+                                          UNSIGNED8* pucBuf,
+                                          UNSIGNED16* pusLen);
+UNSIGNED32 ENTRYPOINT AdsFetchWhereEof   (ADSHANDLE hRes, UNSIGNED16* pbEof);
+UNSIGNED32 ENTRYPOINT AdsFetchWhereClose (ADSHANDLE hRes);
+// V2: load a batch row's recno + fields into hTbl's row cache so
+// AdsGetField / AdsGetRecordNum / AdsAtEOF serve it with no round-trip
+// (forward filter scan walks matches from the batch, no AdsGotoRecord).
+UNSIGNED32 ENTRYPOINT AdsFetchWhereApplyRow(ADSHANDLE hRes, UNSIGNED32 ulRow,
+                                          ADSHANDLE hTbl);
+
+// ── Tier-3: AdsAggregate result API ──────────────────────────────────────────
+// Server-side aggregation.  `pszForCond` is an xBase-style FOR predicate
+// (empty = all rows).  `pszAggSpec` is a ';'-separated list of "FN:FIELD"
+// items, where FN is COUNT|SUM|AVG|MIN|MAX and FIELD is the column to fold
+// (empty for COUNT(*)), e.g. "COUNT:;SUM:QTY;MIN:NM".  Returns one scalar per
+// item, in order; the handle is valid until `AdsAggregateClose`.
+//   - Remote (tcp://) table: the server scans + folds once (opcode 0xA6).
+//   - SQL-backed (sqlite://, etc.) table: pushed down as one
+//     `SELECT COUNT/SUM/AVG/MIN/MAX ... WHERE`; a FOR that can't translate to
+//     SQL returns AE_FUNCTION_NOT_AVAILABLE (caller falls back).
+//   - Local in-process DBF: AE_FUNCTION_NOT_AVAILABLE (5004) — caller falls
+//     back to a client-side totalling loop.
+UNSIGNED32 ENTRYPOINT AdsAggregate      (ADSHANDLE  hTbl,
+                                         UNSIGNED8* pszForCond,
+                                         UNSIGNED8* pszAggSpec,
+                                         ADSHANDLE* phResult);
+UNSIGNED32 ENTRYPOINT AdsAggregateCount (ADSHANDLE hRes, UNSIGNED32* pulCount);
+// ulIndex is 0-based.  *pusType: 0=empty/null, 1=numeric (ASCII decimal,
+// parse with VAL()), 2=string (raw field bytes).  *pusLen is in/out
+// (capacity in, written byte count out), same truncation idiom as AdsGetField.
+UNSIGNED32 ENTRYPOINT AdsAggregateValue (ADSHANDLE   hRes,
+                                         UNSIGNED32  ulIndex,
+                                         UNSIGNED16* pusType,
+                                         UNSIGNED8*  pucBuf,
+                                         UNSIGNED16* pusLen);
+UNSIGNED32 ENTRYPOINT AdsAggregateClose (ADSHANDLE hRes);
 
 #ifdef __cplusplus
 }

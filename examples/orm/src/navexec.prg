@@ -8,6 +8,14 @@
 /* contador de instrumentacao do seek -- prova que o fast-path dispara */
 STATIC s_nSeeks := 0
 
+/* contadores de instrumentacao do AOF (pushdown server-side) */
+STATIC s_nAof        := 0   // quantas vezes SetAOF foi instalado e aceito
+STATIC s_nAofScanned := 0   // quantas rows o cursor AOF percorreu (prova de reducao)
+
+/* contadores de instrumentacao do caminho ordenado por indice */
+STATIC s_nOrd        := 0   // quantas vezes NavSelectOrdered disparou (nao devolveu NIL)
+STATIC s_nOrdWalked  := 0   // quantos registros foram visitados na ultima chamada ordenada
+
 /* ---- DDL: cria DBF a partir do AST do Blueprint -------------------------- */
 FUNCTION NavCreateTable( oConn, hAst )
    LOCAL cTab := TORMGrammar():New():QuoteIdent( hAst[ "table" ] )
@@ -61,12 +69,12 @@ STATIC FUNCTION NavFieldDef( aColumns )
 
 STATIC PROCEDURE NavRaise( cOp, cDesc )
    LOCAL oErr := ErrorNew()
-   oErr:Subsystem( "hb_orm" )
-   oErr:SubCode( 1200 )
-   oErr:Severity( ES_ERROR )
-   oErr:Description( cDesc )                          // sem SQL/path
-   oErr:Operation( cOp )
-   oErr:CanRetry( .F. )
+   oErr:Subsystem := "hb_orm"
+   oErr:SubCode := 1200
+   oErr:Severity := ES_ERROR
+   oErr:Description := cDesc                           // sem SQL/path
+   oErr:Operation := cOp
+   oErr:CanRetry := .F.
    Eval( ErrorBlock(), oErr )
    RETURN
 
@@ -123,6 +131,28 @@ FUNCTION NavInsert( oConn, cTable, hAttrs, cPk )
    lOk := hbo_WriteRec( nTbl ) .AND. lOk
    hbo_TableClose( nTbl )
    RETURN iif( lOk, xPk, NIL )
+
+/* INSERT navegacional CRU: grava EXATAMENTE os campos de hRow, sem injetar PK.
+   Para materializacao de result-set (o NavInsert injeta um id autoinc quando
+   ausente, o que aqui seria errado). Assume que as chaves de hRow sao campos
+   reais da tabela (result-set homogeneo). */
+FUNCTION NavInsertRaw( oConn, cTable, hRow )
+   LOCAL cTab := TORMGrammar():New():QuoteIdent( cTable )
+   LOCAL nTbl, cK, lOk := .T.
+   nTbl := hbo_OpenTable( oConn:Handle(), cTab )
+   IF nTbl == 0
+      RETURN .F.
+   ENDIF
+   hbo_OpenIdxBag( nTbl )                              // mantem indice(s) no append
+   IF ! hbo_Append( nTbl )
+      hbo_TableClose( nTbl ) ; RETURN .F.
+   ENDIF
+   FOR EACH cK IN hb_HKeys( hRow )
+      lOk := NavSetField( nTbl, Upper( cK ), hRow[ cK ] ) .AND. lOk
+   NEXT
+   lOk := hbo_WriteRec( nTbl ) .AND. lOk
+   hbo_TableClose( nTbl )
+   RETURN lOk
 
 /* proximo id = (maior id atual) + 1; 1 em tabela vazia. Scan simples. */
 STATIC FUNCTION NavNextId( oConn, cTable, cPk )
@@ -196,24 +226,160 @@ STATIC FUNCTION NavLocate( nTbl, cPk, xPk )
    ENDDO
    RETURN .F.
 
-/* ---- SELECT navegacional: seek (fast path) | scan -> filtra -> ordena -> fatia
-   O resultado e IDENTICO com ou sem seek -- o seek e so otimizacao O(log n);
-   o scan e a garantia de correcao quando nao ha indice na coluna do filtro. */
+/* ---- SELECT navegacional: seek (fast path) | AOF | scan -> filtra -> ordena -> fatia
+   O resultado e IDENTICO em todos os caminhos -- seek/AOF sao otimizacoes;
+   NavFilter(aWheres COMPLETO) SEMPRE roda apos o scan (correcao nao depende do AOF). */
 FUNCTION NavSelect( oConn, hAst )
-   LOCAL aRows, aWheres
+   RETURN NavSelectImpl( oConn, hAst, .T. )
+
+/* oraculo de teste / desligador: forca o caminho scan+filtro sem AOF */
+FUNCTION NavSelectNoAof( oConn, hAst )
+   RETURN NavSelectImpl( oConn, hAst, .F. )
+
+STATIC FUNCTION NavSelectImpl( oConn, hAst, lUseAof )
+   LOCAL aRows, aWheres, cCond, aOrders
    NavGuardUnsupported( hAst )                        // join/group/having/agg/raw -> levanta
    aWheres := hb_HGetDef( hAst, "wheres", {} )
    /* fast path: 1 termo simples "=" + indice na coluna -> seek O(log n) */
    aRows := NavTrySeek( oConn, hAst[ "table" ], aWheres )
-   IF aRows == NIL                                    // nao aplicavel / sem indice -> scan
-      aRows := NavScanRows( oConn, hAst[ "table" ] )
-      aRows := NavFilter( aRows, aWheres )
+   IF aRows == NIL                                    // nao aplicavel / sem indice -> ordered | AOF | scan
+      /* caminho ordenado: 1 coluna indexada + lUseAof (oracle usa .F. para bypass) */
+      IF lUseAof
+         aOrders := hb_HGetDef( hAst, "orders", {} )
+         IF Len( aOrders ) == 1
+            aRows := NavSelectOrdered( oConn, hAst, aOrders[ 1 ] )
+            IF aRows != NIL
+               RETURN aRows                           // ja filtrado+ordenado+limitado
+            ENDIF
+         ENDIF
+      ENDIF
+      aRows := NIL
+      IF lUseAof
+         cCond := NavBuildAof( aWheres )
+         IF cCond != NIL
+            aRows := NavScanRowsAof( oConn, hAst[ "table" ], cCond )  // NIL se SetAOF falhou
+         ENDIF
+      ENDIF
+      IF aRows == NIL                                 // sem push OU SetAOF falhou -> fallback scan
+         aRows := NavScanRows( oConn, hAst[ "table" ] )
+      ENDIF
+      aRows := NavFilter( aRows, aWheres )            // SEMPRE o conjunto where COMPLETO
    ENDIF
    aRows := NavApplySoftDelete( aRows, hb_HGetDef( hAst, "softDelete", NIL ) )
    aRows := NavApplyOrder( aRows, hb_HGetDef( hAst, "orders", {} ) )
    aRows := NavApplyLimit( aRows, hb_HGetDef( hAst, "limit", NIL ), ;
                                   hb_HGetDef( hAst, "offset", NIL ) )
    RETURN aRows
+
+/* caminho ordenado: navega na ordem do indice (1 col indexada, ASC/DESC),
+   com bounds OrdScope do range na col ordenada + parada-cedo no limit.
+   Devolve rows JA na ordem final, ou NIL (fallback). Aplica NavMatch completo
+   + soft-delete por registro -> identico ao caminho atual. nav em nIdx, leitura
+   em nTbl (compartilham registro corrente; passar nIdx ativa a ordem+escopo). */
+STATIC FUNCTION NavSelectOrdered( oConn, hAst, aOrder )
+   LOCAL cTab := TORMGrammar():New():QuoteIdent( hAst[ "table" ] )
+   LOCAL cCol := aOrder[ 1 ], lDesc := ( Upper( aOrder[ 2 ] ) == "DESC" )
+   LOCAL aWheres := hb_HGetDef( hAst, "wheres", {} )
+   LOCAL hSoft := hb_HGetDef( hAst, "softDelete", NIL )
+   LOCAL nLimit := hb_HGetDef( hAst, "limit", NIL )
+   LOCAL nOffset := hb_HGetDef( hAst, "offset", NIL )
+   LOCAL nTbl, nIdx, aNames := {}, n, i, aRows := {}, hRow
+   LOCAL nWalked := 0, nMatched := 0, nSkip, nTake, xTop, xBot
+
+   nTbl := hbo_OpenTable( oConn:Handle(), cTab )
+   IF nTbl == 0
+      RETURN NIL
+   ENDIF
+   nIdx := NavSeekIndexFor( nTbl, cCol )                 // 0 se nao ha tag p/ a coluna
+   IF nIdx == 0
+      hbo_TableClose( nTbl ) ; RETURN NIL                // sem indice -> fallback
+   ENDIF
+   /* bounds OrdScope dos termos AND na coluna ordenada (NIL se houver OR) */
+   xTop := NavScopeBound( aWheres, cCol, .T. )
+   xBot := NavScopeBound( aWheres, cCol, .F. )
+   IF xTop != NIL .AND. ! NavSetScopeVal( nIdx, 0, xTop )
+      hbo_ClearScope( nIdx, 0 ) ; hbo_ClearScope( nIdx, 1 )
+      hbo_TableClose( nTbl ) ; RETURN NIL
+   ENDIF
+   IF xBot != NIL .AND. ! NavSetScopeVal( nIdx, 1, xBot )
+      hbo_ClearScope( nIdx, 0 ) ; hbo_ClearScope( nIdx, 1 )
+      hbo_TableClose( nTbl ) ; RETURN NIL
+   ENDIF
+   n := hbo_NumFields( nTbl )
+   FOR i := 1 TO n ; AAdd( aNames, AllTrim( hbo_FieldName( nTbl, i ) ) ) ; NEXT
+   nSkip := iif( nOffset == NIL, 0, nOffset )
+   nTake := iif( nLimit == NIL, -1, nLimit )
+   IF nTake == 0                                           // limit=0 -> oracle devolve {} -> paridade
+      hbo_ClearScope( nIdx, 0 ) ; hbo_ClearScope( nIdx, 1 )
+      hbo_TableClose( nTbl )
+      s_nOrdWalked := 0 ; s_nOrd++
+      RETURN {}
+   ENDIF
+   IF lDesc ; hbo_GoBottom( nIdx ) ; ELSE ; hbo_GoTop( nIdx ) ; ENDIF
+   DO WHILE iif( lDesc, ! hbo_Bof( nIdx ), ! hbo_Eof( nIdx ) )
+      nWalked++
+      IF ! hbo_IsDeleted( nTbl )
+         hRow := NavHydrateRow( nTbl, aNames )
+         IF NavMatch( hRow, aWheres ) .AND. NavSoftAlive( hRow, hSoft )
+            nMatched++
+            IF nMatched > nSkip
+               AAdd( aRows, hRow )
+               IF nTake >= 0 .AND. Len( aRows ) >= nTake
+                  EXIT                                    // parada-cedo
+               ENDIF
+            ENDIF
+         ENDIF
+      ENDIF
+      hbo_Skip( nIdx, iif( lDesc, -1, 1 ) )
+   ENDDO
+   hbo_ClearScope( nIdx, 0 ) ; hbo_ClearScope( nIdx, 1 )
+   hbo_TableClose( nTbl )
+   s_nOrdWalked := nWalked
+   s_nOrd++
+   RETURN aRows
+
+/* valor do bound p/ a coluna ordenada: lTop -> termo >=/> ; !lTop -> termo <=/< .
+   So termos AND simple sobre cCol; se HOUVER QUALQUER OR na lista -> NIL (um
+   bound parcial sob OR sub-incluiria). Apenas valores numericos/string (data
+   nao vira bound em V1 -> filtrada por NavMatch). */
+STATIC FUNCTION NavScopeBound( aWheres, cCol, lTop )
+   LOCAL w, i, cOp, xVal
+   FOR i := 2 TO Len( aWheres )
+      IF Upper( hb_HGetDef( aWheres[ i ], "bool", "AND" ) ) == "OR"
+         RETURN NIL
+      ENDIF
+   NEXT
+   FOR EACH w IN aWheres
+      IF HB_ISHASH( w ) .AND. hb_HGetDef( w, "kind", "simple" ) == "simple" ;
+         .AND. Lower( hb_HGetDef( w, "col", "" ) ) == Lower( cCol )
+         cOp  := hb_HGetDef( w, "op", "=" )
+         xVal := hb_HGetDef( w, "val", NIL )
+         IF ! ( HB_ISNUMERIC( xVal ) .OR. HB_ISSTRING( xVal ) )
+            LOOP
+         ENDIF
+         IF lTop  .AND. ( cOp == ">=" .OR. cOp == ">" ) ; RETURN xVal ; ENDIF
+         IF !lTop .AND. ( cOp == "<=" .OR. cOp == "<" ) ; RETURN xVal ; ENDIF
+      ENDIF
+   NEXT
+   RETURN NIL
+
+/* Dispatch pelo TIPO DO VALOR (numerico->SetScopeNum, else->SetScopeStr); tipo-errado mis-bounds mas NavMatch refina -> resultado correto */
+STATIC FUNCTION NavSetScopeVal( nIdx, nScope, xVal )
+   IF HB_ISNUMERIC( xVal )
+      RETURN hbo_SetScopeNum( nIdx, nScope, xVal )
+   ENDIF
+   RETURN hbo_SetScopeStr( nIdx, nScope, hb_CStr( xVal ) )
+
+/* vivo por soft-delete (mesma semantica do NavApplySoftDelete, por registro) */
+STATIC FUNCTION NavSoftAlive( hRow, hSoft )
+   LOCAL cKey, lNeg, lAlive
+   IF hSoft == NIL
+      RETURN .T.
+   ENDIF
+   cKey := Lower( hSoft[ "col" ] )
+   lNeg := hb_HGetDef( hSoft, "negate", .F. )
+   lAlive := Empty( hb_HGetDef( hRow, cKey, NIL ) )
+   RETURN iif( lNeg, ! lAlive, lAlive )
 
 /* ---- seek por indice: prova de disparo via contador --------------------- *
    s_nSeeks (declarado no topo do modulo) conta SO os seeks que de fato
@@ -222,6 +388,14 @@ FUNCTION NavSelect( oConn, hAst )
    distinguir seek real de fallback. */
 FUNCTION NavSeekCount()      ; RETURN s_nSeeks
 FUNCTION NavResetSeekCount() ; s_nSeeks := 0 ; RETURN NIL
+
+FUNCTION NavAofCount()       ; RETURN s_nAof
+FUNCTION NavResetAofCount()  ; s_nAof := 0 ; s_nAofScanned := 0 ; RETURN NIL
+FUNCTION NavAofLastScanned() ; RETURN s_nAofScanned
+
+FUNCTION NavOrdCount()       ; RETURN s_nOrd
+FUNCTION NavResetOrdCount()  ; s_nOrd := 0 ; s_nOrdWalked := 0 ; RETURN NIL
+FUNCTION NavOrdLastWalked()  ; RETURN s_nOrdWalked
 
 /* devolve as rows casadas por seek, ou NIL se nao aplicavel (=> usa scan).
    Coleta todos os registros com a chave (soft-seek + walk enquanto igual);
@@ -310,9 +484,62 @@ STATIC FUNCTION NavScanRows( oConn, cTable )
    hbo_TableClose( nTbl )
    RETURN aRows
 
+/* scan com AOF instalado no MESMO handle que faz o GoTop/Skip.
+   Devolve rows, ou NIL se hbo_SetAOF falhou (rc != 0) -- sinaliza fallback
+   p/ scan completo. NAO checa OptLevel: um AOF full-scan funcionando reporta
+   NONE; o que importa e que o cursor honra o filtro (GoTop/Skip andam so nas
+   linhas que casam). Grava s_nAofScanned = Len(rows) como prova de reducao. */
+STATIC FUNCTION NavScanRowsAof( oConn, cTable, cCond )
+   LOCAL cTab := TORMGrammar():New():QuoteIdent( cTable )
+   LOCAL nTbl, aNames := {}, n, i, aRows := {}
+   nTbl := hbo_OpenTable( oConn:Handle(), cTab )
+   IF nTbl == 0
+      NavRaise( "NavSelect", "tabela nao abre (navegacional)" )
+      RETURN {}
+   ENDIF
+   IF ! hbo_SetAOF( nTbl, cCond )
+      hbo_ClearAOF( nTbl )
+      hbo_TableClose( nTbl )
+      RETURN NIL                                       // SetAOF falhou -> sinaliza fallback
+   ENDIF
+   n := hbo_NumFields( nTbl )
+   FOR i := 1 TO n
+      AAdd( aNames, AllTrim( hbo_FieldName( nTbl, i ) ) )
+   NEXT
+   hbo_GoTop( nTbl )
+   DO WHILE ! hbo_Eof( nTbl )
+      IF ! hbo_IsDeleted( nTbl )
+         AAdd( aRows, NavHydrateRow( nTbl, aNames ) )
+      ENDIF
+      hbo_Skip( nTbl, 1 )
+   ENDDO
+   hbo_ClearAOF( nTbl )
+   hbo_TableClose( nTbl )
+   s_nAofScanned := Len( aRows )                      // prova de reducao server-side
+   s_nAof++
+   RETURN aRows
+
 /* hidratacao com getters NATIVOS vivos: N->double real, NULL->NIL via AdsIsNull;
    logico via "T"; C/D/T ficam string (a camada Casts do Model coage D/T, igual ao
    caminho SQL). Chave da row em minuscula p/ casar com as colunas do dominio. */
+/* Le um campo numerico de forma uniforme entre backends. O getter de double
+   nativo e a fonte primaria (preserva o comportamento ja provado dos backends
+   de arquivo). Alguns backends de cursor so expoem o valor como texto (o getter
+   de double devolve 0 sem erro); nesse caso recorre-se ao texto bruto, que e
+   confiavel em todos os backends. dec==0 -> inteiro. */
+STATIC FUNCTION NavReadNum( nTbl, cName, nDec )
+   LOCAL nVal := hbo_GetNum( nTbl, cName ), cRaw, nRaw
+   IF nVal == 0
+      cRaw := AllTrim( hbo_Field( nTbl, cName ) )
+      IF ! Empty( cRaw )
+         nRaw := Val( cRaw )
+         IF nRaw != 0
+            nVal := nRaw
+         ENDIF
+      ENDIF
+   ENDIF
+   RETURN iif( nDec == 0, Int( nVal ), nVal )
+
 STATIC FUNCTION NavHydrateRow( nTbl, aNames )
    LOCAL hRow := hb_Hash(), cName, cKey, cTag, cRaw
    FOR EACH cName IN aNames
@@ -324,11 +551,7 @@ STATIC FUNCTION NavHydrateRow( nTbl, aNames )
       cTag := hbo_FieldType( nTbl, cName )
       DO CASE
       CASE cTag == "N"
-         IF hbo_FieldDecimals( nTbl, cName ) == 0
-            hRow[ cKey ] := Int( hbo_GetNum( nTbl, cName ) )
-         ELSE
-            hRow[ cKey ] := hbo_GetNum( nTbl, cName )
-         ENDIF
+         hRow[ cKey ] := NavReadNum( nTbl, cName, hbo_FieldDecimals( nTbl, cName ) )
       CASE cTag == "L" ; hRow[ cKey ] := ( Upper( Left( hbo_Field( nTbl, cName ), 1 ) ) $ "TY" )
       OTHERWISE
          cRaw := hbo_Field( nTbl, cName )
@@ -380,6 +603,7 @@ STATIC FUNCTION NavMatch( hRow, aWheres )
          lTerm := ( AScan( w[ "vals" ], ;
                     {| x | NavEq( hb_HGetDef( hRow, Lower( w[ "col" ] ), NIL ), x ) } ) > 0 )
       CASE cKind == "null"
+
          /* Empty() trata campo em branco E chave ausente (NIL) como nulo -- semantica strict-null do nav */
          lTerm := iif( hb_HGetDef( w, "negate", .F. ), ;
                        ! Empty( hb_HGetDef( hRow, Lower( w[ "col" ] ), NIL ) ), ;
@@ -454,3 +678,135 @@ STATIC FUNCTION NavApplyLimit( aRows, nLimit, nOffset )
       AAdd( aOut, aRows[ i ] )
    NEXT
    RETURN aOut
+
+/* ---- AOF: traduz o envelope wheres em condicao ADS empurravel ------------
+   Devolve cCond (string) ou NIL quando nada seguro a empurrar. A correcao
+   nao depende disto: NavSelect roda NavFilter(aWheres COMPLETO) apos o scan.
+   Regra: so empurra C tal que predicado-completo => C (ver spec sec.4). */
+FUNCTION NavBuildAof( aWheres )
+   LOCAL lAnyOr := .F., w, aPush := {}, cCond, cTerm, i
+
+   IF aWheres == NIL .OR. Len( aWheres ) == 0
+      RETURN NIL
+   ENDIF
+   /* ha algum OR na lista (do 2o termo em diante)? */
+   FOR i := 2 TO Len( aWheres )
+      IF Upper( hb_HGetDef( aWheres[ i ], "bool", "AND" ) ) == "OR"
+         lAnyOr := .T.
+         EXIT
+      ENDIF
+   NEXT
+
+   IF lAnyOr
+      /* OR: so empurra se TODOS os termos forem AOF-able; reproduz o fold
+         esquerda->direita do NavMatch com parenteses explicitos. */
+      FOR EACH w IN aWheres
+         IF ! NavAofAble( w )
+            RETURN NIL
+         ENDIF
+      NEXT
+      cCond := NavAofTerm( aWheres[ 1 ] )
+      FOR i := 2 TO Len( aWheres )
+         cTerm := NavAofTerm( aWheres[ i ] )
+         cCond := "( " + cCond + ;
+            iif( Upper( aWheres[ i ][ "bool" ] ) == "OR", " .OR. ", " .AND. " ) + ;
+            cTerm + " )"
+      NEXT
+      RETURN cCond
+   ENDIF
+
+   /* so-AND: empurra os AOF-able; os nao-AOF ficam pro NavFilter completo */
+   FOR EACH w IN aWheres
+      IF NavAofAble( w )
+         AAdd( aPush, NavAofTerm( w ) )
+      ENDIF
+   NEXT
+   IF Len( aPush ) == 0
+      RETURN NIL
+   ENDIF
+   cCond := ""
+   FOR i := 1 TO Len( aPush )
+      cCond += iif( i == 1, "", " .AND. " ) + aPush[ i ]
+   NEXT
+   RETURN cCond
+
+/* um termo e empurravel? */
+STATIC FUNCTION NavAofAble( w )
+   LOCAL cKind, cOp, xVal, x
+   IF ! HB_ISHASH( w )
+      RETURN .F.
+   ENDIF
+   cKind := hb_HGetDef( w, "kind", "simple" )
+   DO CASE
+   CASE cKind == "simple"
+      cOp  := hb_HGetDef( w, "op", "=" )
+      xVal := hb_HGetDef( w, "val", NIL )
+      /* op no conjunto exato (AScan, nao $ -- "=" e substring de "<=") */
+      IF AScan( { "=", "==", "!=", "<>", "<", "<=", ">", ">=" }, cOp ) == 0
+         RETURN .F.
+      ENDIF
+      /* data NAO e AOF-able (CTOD e funcao, fora do subset) */
+      IF HB_ISDATE( xVal )
+         RETURN .F.
+      ENDIF
+      /* numerico: todos os 8 ops sao AOF-able (comparacao identica no ADS e no NavMatch) */
+      IF HB_ISNUMERIC( xVal )
+         RETURN .T.
+      ENDIF
+      /* string: SÓ = e == sao AOF-able -- semantica safe (superset do NavMatch):
+         ADS char = faz prefix-match (superset) -> NavFilter refina -> correto.
+         Para !=/<>/</<=/>/>=: ADS padding/collation NAO coincide com o raw-byte
+         NavMatch -> pode sub-incluir rows (under-inclusion) -> NAO empurrar;
+         cai no NavFilter completo (safe fallback). */
+      IF HB_ISSTRING( xVal )
+         RETURN ( cOp == "=" .OR. cOp == "==" )
+      ENDIF
+      RETURN .F.
+   CASE cKind == "in"
+      FOR EACH x IN hb_HGetDef( w, "vals", {} )
+         IF ! ( HB_ISNUMERIC( x ) .OR. HB_ISSTRING( x ) )
+            RETURN .F.
+         ENDIF
+      NEXT
+      RETURN Len( hb_HGetDef( w, "vals", {} ) ) > 0
+   ENDCASE
+   RETURN .F.
+
+/* renderiza um termo AOF-able em string ADS (assume NavAofAble ja validou) */
+STATIC FUNCTION NavAofTerm( w )
+   LOCAL cKind := hb_HGetDef( w, "kind", "simple" ), cField, cOp, aOut, x
+   cField := Upper( w[ "col" ] )
+   IF cKind == "in"
+      aOut := {}
+      FOR EACH x IN w[ "vals" ]
+         AAdd( aOut, NavAofLit( x ) )
+      NEXT
+      RETURN cField + " IN (" + ArrJoin( aOut, ", " ) + ")"
+   ENDIF
+   cOp := NavAofOp( w[ "op" ] )
+   RETURN cField + " " + cOp + " " + NavAofLit( w[ "val" ] )
+
+/* normaliza operador p/ a forma que o parser AOF aceita */
+STATIC FUNCTION NavAofOp( cOp )
+   DO CASE
+   CASE cOp == "=="  ; RETURN "="
+   CASE cOp == "<>"  ; RETURN "!="
+   ENDCASE
+   RETURN cOp
+
+/* literal: numero cru (hb_ntos preserva precisao propria do valor -- nao depende
+   de SET DECIMALS, evita arredondamento de Str() que tornaria o AOF mais restrito
+   que o predicado real do NavMatch); string entre aspas simples com escape de aspas */
+STATIC FUNCTION NavAofLit( xVal )
+   IF HB_ISNUMERIC( xVal )
+      RETURN hb_ntos( xVal )
+   ENDIF
+   RETURN "'" + StrTran( hb_CStr( xVal ), "'", "''" ) + "'"
+
+/* join simples de array de strings (sem depender de hb_jsonEncode) */
+STATIC FUNCTION ArrJoin( a, cSep )
+   LOCAL c := "", i
+   FOR i := 1 TO Len( a )
+      c += iif( i == 1, "", cSep ) + a[ i ]
+   NEXT
+   RETURN c

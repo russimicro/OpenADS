@@ -37,17 +37,21 @@ rem Generate the .hbp: the example + the ORM sources + the link line.
 rem (the example entry is the bare basename -- hbmk2 resolves source
 rem  paths relative to the .hbp file's own directory)
 > "%HBP%"  echo %EXEBASE%.prg
->>"%HBP%" echo %OADS_ORM_SRC%\hbo_ace.prg
->>"%HBP%" echo %OADS_ORM_SRC%\connection.prg
->>"%HBP%" echo %OADS_ORM_SRC%\grammar.prg
->>"%HBP%" echo %OADS_ORM_SRC%\querybuilder.prg
->>"%HBP%" echo %OADS_ORM_SRC%\schema.prg
->>"%HBP%" echo %OADS_ORM_SRC%\model.prg
->>"%HBP%" echo -I%OADS_ORM_SRC%\..\include
->>"%HBP%" echo -I%OPENADS_INCDIR%
+rem  Pull EVERY .prg from the ORM's src\ -- robust to which revision you
+rem  point OADS_ORM_SRC at: the stable ORM (a handful of files) or the newer
+rem  hb_orm2 (more files: casts/relations/navexec/scopes/observers/...).
+rem  (hb_orm2 ships an hbo_ace_stub.prg that is empty unless -dHBORM_NO_ENGINE,
+rem   so globbing it here is harmless -- no duplicate symbols.)
+for %%P in ("%OADS_ORM_SRC%\*.prg") do >>"%HBP%" echo "%%~fP"
+>>"%HBP%" echo "-I%OADS_ORM_SRC%\..\include"
+>>"%HBP%" echo "-I%OPENADS_INCDIR%"
 >>"%HBP%" echo -lrddads
->>"%HBP%" echo -L%OPENADS_LIB%
+>>"%HBP%" echo "-L%OPENADS_LIB%"
 >>"%HBP%" echo -l%OPENADS_ACELIB%
+rem  hb_orm2 carries an in-process SQLite direct driver (hbo_direto/conn_direto);
+rem  globbing those pulls sqlite3_* symbols, so link the Harbour sqlite3 contrib.
+rem  (Harmless for the stable ORM, which has no such files.)
+>>"%HBP%" echo -lsqlite3
 rem CRT-compat (see ../docs/building-and-running.md):
 >>"%HBP%" echo -ldflag=/NODEFAULTLIB:msvcrt
 >>"%HBP%" echo -ldflag=/NODEFAULTLIB:libucrt

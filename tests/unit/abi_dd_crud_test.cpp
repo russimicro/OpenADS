@@ -4,29 +4,7 @@
 #include <array>
 #include <cstdint>
 
-extern "C" {
 
-UNSIGNED32 AdsDDAddIndexFile      (ADSHANDLE, UNSIGNED8*, UNSIGNED8*, UNSIGNED8*);
-UNSIGNED32 AdsDDRemoveIndexFile   (ADSHANDLE, UNSIGNED8*, UNSIGNED8*, UNSIGNED16);
-UNSIGNED32 AdsDDCreateLink        (ADSHANDLE, UNSIGNED8*, UNSIGNED8*,
-                                   UNSIGNED8*, UNSIGNED8*, UNSIGNED16);
-UNSIGNED32 AdsDDDropLink          (ADSHANDLE, UNSIGNED8*, UNSIGNED16);
-UNSIGNED32 AdsDDCreateUser        (ADSHANDLE, UNSIGNED8*, UNSIGNED8*,
-                                   UNSIGNED8*, UNSIGNED8*);
-UNSIGNED32 AdsDDDeleteUser        (ADSHANDLE, UNSIGNED8*);
-UNSIGNED32 AdsDDAddUserToGroup    (ADSHANDLE, UNSIGNED8*, UNSIGNED8*);
-UNSIGNED32 AdsDDRemoveUserFromGroup(ADSHANDLE, UNSIGNED8*, UNSIGNED8*);
-UNSIGNED32 AdsDDCreateRefIntegrity (ADSHANDLE, UNSIGNED8*, UNSIGNED8*,
-                                    UNSIGNED8*, UNSIGNED8*, UNSIGNED8*,
-                                    UNSIGNED8*,
-                                    UNSIGNED16, UNSIGNED16);
-UNSIGNED32 AdsDDRemoveRefIntegrity (ADSHANDLE, UNSIGNED8*);
-UNSIGNED32 AdsDDGetDatabaseProperty(ADSHANDLE, UNSIGNED16, void*, UNSIGNED16*);
-UNSIGNED32 AdsDDSetDatabaseProperty(ADSHANDLE, UNSIGNED16, void*, UNSIGNED16);
-UNSIGNED32 AdsDDGetUserProperty    (ADSHANDLE, UNSIGNED8*, UNSIGNED16,
-                                    void*, UNSIGNED16*);
-
-}  // extern "C"
 
 TEST_CASE("M9.25 DD CRUD calls accept silently and return AE_SUCCESS") {
     UNSIGNED8 alias[16] = "remote";

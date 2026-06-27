@@ -1,4 +1,4 @@
-add_executable(openads_serverd main.cpp)
+add_executable(openads_serverd main.cpp config_ini.cpp setup_wizard.cpp)
 target_link_libraries(openads_serverd PRIVATE openads_core)
 target_include_directories(openads_serverd PRIVATE
     ${CMAKE_SOURCE_DIR}

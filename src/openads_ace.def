@@ -401,3 +401,18 @@ EXPORTS
     AdsDDGrantPermission
     AdsDDRevokePermission
 
+    ; Task 2: server-side filtered scan result-set API
+    AdsFetchWhere
+    AdsFetchWhereRows
+    AdsFetchWhereRecno
+    AdsFetchWhereField
+    AdsFetchWhereEof
+    AdsFetchWhereClose
+    AdsFetchWhereApplyRow
+
+    ; Tier-3: server-side aggregation result API
+    AdsAggregate
+    AdsAggregateCount
+    AdsAggregateValue
+    AdsAggregateClose
+

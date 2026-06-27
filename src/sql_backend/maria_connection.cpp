@@ -598,4 +598,320 @@ util::Result<bool> MariaConnection::seek_index(
 #endif
 }
 
+#if defined(OPENADS_WITH_MARIADB)
+namespace {
+
+// Re-run the PK snapshot SELECT (same shape as open_table) so RECCOUNT and row
+// ordering reflect a just-committed INSERT/DELETE (autocommit is on).
+util::Result<void> reload_pk_snapshot(MYSQL* conn, MariaTable* tbl) {
+    const std::string sql = "SELECT " + pk_select_list(*tbl) + " FROM " +
+                            quote_ident(tbl->name) + " ORDER BY " +
+                            pk_order_by(*tbl);
+    if (mysql_query(conn, sql.c_str()) != 0) {
+        return maria_error("pk snapshot", mysql_error(conn));
+    }
+    MYSQL_RES* res = mysql_store_result(conn);
+    if (res == nullptr) return maria_error("pk snapshot", mysql_error(conn));
+    const unsigned int pk_cols =
+        static_cast<unsigned int>(tbl->pk_columns.size());
+    tbl->pk_snapshot.clear();
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res)) != nullptr) {
+        MariaTable::PkRow pk_row;
+        pk_row.values.resize(pk_cols);
+        for (unsigned int c = 0; c < pk_cols; ++c) {
+            bool is_null = false;
+            pk_row.values[c] = format_maria_value(row, c, is_null);
+            if (is_null) pk_row.values[c].clear();
+        }
+        tbl->pk_snapshot.push_back(std::move(pk_row));
+    }
+    mysql_free_result(res);
+    tbl->cached_rec_count = static_cast<std::uint32_t>(tbl->pk_snapshot.size());
+    tbl->rec_count_cached = true;
+    return util::Result<void>{};
+}
+
+} // namespace
+#endif
+
+util::Result<void> MariaConnection::append_blank(MariaTable* tbl) {
+#if defined(OPENADS_WITH_MARIADB)
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid maria append", ""};
+    }
+    if (!tbl->fields_cached) {
+        if (auto d = describe_table_impl(impl_->conn, tbl); !d) return d.error();
+    }
+    tbl->staging_row.assign(tbl->fields.size(), std::string{});
+    tbl->staging_nulls.assign(tbl->fields.size(), true);
+    tbl->pending_append = true;
+    tbl->row_dirty      = true;
+    tbl->row_valid      = true;
+    tbl->positioned     = true;
+    tbl->current_recno  = 0;
+    return util::Result<void>{};
+#else
+    (void)tbl;
+    return util::Error{5004, 0, "mariadb backend disabled", ""};
+#endif
+}
+
+util::Result<void> MariaConnection::set_field(
+    MariaTable* tbl, const std::string& field_name, const std::string& value) {
+#if defined(OPENADS_WITH_MARIADB)
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid maria set_field", ""};
+    }
+    if (!tbl->row_valid && !tbl->pending_append) {
+        return util::Error{5026, 0, "no current record", ""};
+    }
+    if (!tbl->fields_cached) return util::Error{5001, 0, "schema not cached", ""};
+    const std::size_t idx = field_index_ci(*tbl, field_name);
+    if (idx == static_cast<std::size_t>(-1)) {
+        return util::Error{5063, 0, "column not found", field_name};
+    }
+    if (!tbl->row_dirty && !tbl->pending_append) {
+        tbl->staging_row   = tbl->current_row;
+        tbl->staging_nulls = tbl->current_nulls;
+    }
+    if (tbl->staging_row.size() < tbl->fields.size()) {
+        tbl->staging_row.resize(tbl->fields.size());
+        tbl->staging_nulls.resize(tbl->fields.size(), true);
+    }
+    tbl->staging_row[idx]   = value;
+    tbl->staging_nulls[idx] = false;
+    tbl->row_dirty          = true;
+    return util::Result<void>{};
+#else
+    (void)tbl;
+    (void)field_name;
+    (void)value;
+    return util::Error{5004, 0, "mariadb backend disabled", ""};
+#endif
+}
+
+util::Result<void> MariaConnection::flush_record(MariaTable* tbl) {
+#if defined(OPENADS_WITH_MARIADB)
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid maria flush", ""};
+    }
+    if (!tbl->row_dirty && !tbl->pending_append) return util::Result<void>{};
+    if (!tbl->fields_cached) return util::Error{5001, 0, "schema not cached", ""};
+    MYSQL* conn = impl_->conn;
+
+    auto lit = [&](std::size_t i) -> std::string {
+        if (i >= tbl->staging_nulls.size() || tbl->staging_nulls[i]) return "NULL";
+        return escape_literal(conn, tbl->staging_row[i]);
+    };
+
+    std::vector<bool> is_pk(tbl->fields.size(), false);
+    for (const std::string& pkc : tbl->pk_columns) {
+        const std::size_t fi = field_index_ci(*tbl, pkc);
+        if (fi != static_cast<std::size_t>(-1)) is_pk[fi] = true;
+    }
+
+    if (tbl->pending_append) {
+        std::string cols, vals;
+        bool any = false;
+        for (std::size_t i = 0; i < tbl->fields.size(); ++i) {
+            if (i < tbl->staging_nulls.size() && tbl->staging_nulls[i]) continue;
+            if (any) { cols += ", "; vals += ", "; }
+            cols += quote_ident(tbl->fields[i].name);
+            vals += lit(i);
+            any = true;
+        }
+        if (!any) return util::Error{5001, 0, "insert has no columns", tbl->name};
+        const std::string sql = "INSERT INTO " + quote_ident(tbl->name) +
+                                " (" + cols + ") VALUES (" + vals + ")";
+        if (mysql_query(conn, sql.c_str()) != 0) {
+            return maria_error("insert", mysql_error(conn));
+        }
+        MariaTable::PkRow pk;
+        pk.values.resize(tbl->pk_columns.size());
+        bool pk_ready = true;
+        for (std::size_t i = 0; i < tbl->pk_columns.size(); ++i) {
+            const std::size_t fi = field_index_ci(*tbl, tbl->pk_columns[i]);
+            if (fi == static_cast<std::size_t>(-1) ||
+                (fi < tbl->staging_nulls.size() && tbl->staging_nulls[fi])) {
+                pk_ready = false;
+                break;
+            }
+            pk.values[i] = tbl->staging_row[fi];
+        }
+        tbl->pending_append = false;
+        tbl->row_dirty      = false;
+        if (auto s = reload_pk_snapshot(conn, tbl); !s) return s.error();
+        if (pk_ready) {
+            for (std::size_t i = 0; i < tbl->pk_snapshot.size(); ++i) {
+                if (tbl->pk_snapshot[i].values == pk.values) {
+                    tbl->pos        = i;
+                    tbl->positioned = true;
+                    return load_current_row(conn, tbl);
+                }
+            }
+        }
+        return util::Result<void>{};
+    }
+
+    if (tbl->pos >= tbl->pk_snapshot.size()) {
+        return util::Error{5026, 0, "no current record", ""};
+    }
+    const MariaTable::PkRow current_pk = tbl->pk_snapshot[tbl->pos];
+    std::string set_clause;
+    bool any = false;
+    for (std::size_t i = 0; i < tbl->fields.size(); ++i) {
+        if (is_pk[i]) continue;
+        if (i >= tbl->staging_row.size()) continue;
+        if (any) set_clause += ", ";
+        set_clause += quote_ident(tbl->fields[i].name) + " = " + lit(i);
+        any = true;
+    }
+    if (!any) { tbl->row_dirty = false; return util::Result<void>{}; }
+    const std::string sql = "UPDATE " + quote_ident(tbl->name) + " SET " +
+                            set_clause + " WHERE " +
+                            pk_where_clause(conn, *tbl, current_pk);
+    if (mysql_query(conn, sql.c_str()) != 0) {
+        return maria_error("update", mysql_error(conn));
+    }
+    tbl->row_dirty = false;
+    return load_current_row(conn, tbl);
+#else
+    (void)tbl;
+    return util::Error{5004, 0, "mariadb backend disabled", ""};
+#endif
+}
+
+util::Result<void> MariaConnection::delete_record(MariaTable* tbl) {
+#if defined(OPENADS_WITH_MARIADB)
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid maria delete", ""};
+    }
+    if (tbl->pending_append || tbl->pos >= tbl->pk_snapshot.size() ||
+        !tbl->positioned) {
+        return util::Error{5026, 0, "no current record", ""};
+    }
+    MYSQL* conn = impl_->conn;
+    const std::string sql = "DELETE FROM " + quote_ident(tbl->name) +
+                            " WHERE " +
+                            pk_where_clause(conn, *tbl, tbl->pk_snapshot[tbl->pos]);
+    if (mysql_query(conn, sql.c_str()) != 0) {
+        return maria_error("delete", mysql_error(conn));
+    }
+    tbl->positioned     = false;
+    tbl->row_valid      = false;
+    tbl->row_dirty      = false;
+    tbl->pending_append = false;
+    return reload_pk_snapshot(conn, tbl);
+#else
+    (void)tbl;
+    return util::Error{5004, 0, "mariadb backend disabled", ""};
+#endif
+}
+
+#if defined(OPENADS_WITH_MARIADB)
+namespace {
+
+std::string lock_record_key(const MariaTable& tbl, std::size_t pos) {
+    std::string k = "R\x1f" + tbl.name;
+    if (pos < tbl.pk_snapshot.size()) {
+        for (const std::string& v : tbl.pk_snapshot[pos].values) k += "\x1f" + v;
+    }
+    return k;
+}
+
+// Runs SELECT fn(MD5('key')[, 0]) and returns its integer result (1 = got the
+// lock / released). MD5 keeps the name within MariaDB's 64-char lock-name limit.
+util::Result<long long> lock_call(MYSQL* conn, const std::string& expr) {
+    if (mysql_query(conn, expr.c_str()) != 0) {
+        return maria_error("named lock", mysql_error(conn));
+    }
+    MYSQL_RES* res = mysql_store_result(conn);
+    if (res == nullptr) return maria_error("named lock", mysql_error(conn));
+    long long val = 0;
+    MYSQL_ROW row = mysql_fetch_row(res);
+    if (row != nullptr && row[0] != nullptr) val = std::atoll(row[0]);
+    mysql_free_result(res);
+    return val;
+}
+
+} // namespace
+#endif
+
+util::Result<void> MariaConnection::lock_record(MariaTable* tbl,
+                                                std::uint32_t recno) {
+#if defined(OPENADS_WITH_MARIADB)
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid maria lock", ""};
+    }
+    const std::size_t pos =
+        (recno == 0) ? tbl->pos : static_cast<std::size_t>(recno - 1);
+    if (pos >= tbl->pk_snapshot.size()) {
+        return util::Error{5026, 0, "no current record", ""};
+    }
+    const std::string sql = "SELECT GET_LOCK(MD5(" +
+        escape_literal(impl_->conn, lock_record_key(*tbl, pos)) + "), 0)";
+    auto r = lock_call(impl_->conn, sql);
+    if (!r) return r.error();
+    if (r.value() != 1) return util::Error{5035, 0, "record locked", ""};
+    return util::Result<void>{};
+#else
+    (void)tbl; (void)recno;
+    return util::Error{5004, 0, "mariadb backend disabled", ""};
+#endif
+}
+
+util::Result<void> MariaConnection::unlock_record(MariaTable* tbl,
+                                                  std::uint32_t recno) {
+#if defined(OPENADS_WITH_MARIADB)
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid maria unlock", ""};
+    }
+    const std::size_t pos =
+        (recno == 0) ? tbl->pos : static_cast<std::size_t>(recno - 1);
+    if (pos >= tbl->pk_snapshot.size()) return util::Result<void>{};
+    const std::string sql = "SELECT RELEASE_LOCK(MD5(" +
+        escape_literal(impl_->conn, lock_record_key(*tbl, pos)) + "))";
+    auto r = lock_call(impl_->conn, sql);
+    if (!r) return r.error();
+    return util::Result<void>{};
+#else
+    (void)tbl; (void)recno;
+    return util::Error{5004, 0, "mariadb backend disabled", ""};
+#endif
+}
+
+util::Result<void> MariaConnection::lock_table(MariaTable* tbl) {
+#if defined(OPENADS_WITH_MARIADB)
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid maria lock", ""};
+    }
+    const std::string sql = "SELECT GET_LOCK(MD5(" +
+        escape_literal(impl_->conn, "T\x1f" + tbl->name) + "), 0)";
+    auto r = lock_call(impl_->conn, sql);
+    if (!r) return r.error();
+    if (r.value() != 1) return util::Error{5035, 0, "table locked", ""};
+    return util::Result<void>{};
+#else
+    (void)tbl;
+    return util::Error{5004, 0, "mariadb backend disabled", ""};
+#endif
+}
+
+util::Result<void> MariaConnection::unlock_table(MariaTable* tbl) {
+#if defined(OPENADS_WITH_MARIADB)
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid maria unlock", ""};
+    }
+    const std::string sql = "SELECT RELEASE_LOCK(MD5(" +
+        escape_literal(impl_->conn, "T\x1f" + tbl->name) + "))";
+    auto r = lock_call(impl_->conn, sql);
+    if (!r) return r.error();
+    return util::Result<void>{};
+#else
+    (void)tbl;
+    return util::Error{5004, 0, "mariadb backend disabled", ""};
+#endif
+}
+
 } // namespace openads::sql_backend

@@ -99,8 +99,10 @@ util::Result<void> load_current_row(sqlite3* db, SqliteTable* tbl) {
         if (!d) return d.error();
     }
 
+    // Use the field optimizer's select fragment (may be "*" or a column list).
+    const std::string sel = tbl->field_optimizer.select_fragment();
     const std::string sql =
-        "SELECT * FROM \"" + tbl->name + "\" WHERE rowid=?1";
+        "SELECT " + sel + " FROM \"" + tbl->name + "\" WHERE rowid=?1";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db, sql.c_str(),
                            static_cast<int>(sql.size()),
@@ -185,6 +187,17 @@ util::Result<SqliteConnection> SqliteConnection::open(const SqliteUri& uri) {
             return ck.error();
         }
     }
+    // Concurrency hardening. Without a busy timeout, any contended write
+    // returns SQLITE_BUSY ("database is locked") immediately, so a workload
+    // spread over several connections sheds a large fraction of its writes.
+    // A bounded busy timeout turns that hard failure into a short wait, which
+    // is the behaviour a multi-user ADS application expects. WAL additionally
+    // lets readers run concurrently with a writer; it is a best-effort
+    // optimisation (it cannot be enabled on :memory: or read-only media), so a
+    // failure to switch journal mode is left non-fatal — the busy timeout is
+    // the part that matters for correctness under contention.
+    sqlite3_busy_timeout(raw, 5000);
+    sqlite3_exec(raw, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
     conn.impl_->db = raw;
     return conn;
 #else
@@ -214,6 +227,43 @@ bool SqliteConnection::valid() const noexcept {
 #endif
 }
 
+namespace {
+
+// Load (or reload) the rowid navigation list for `tbl`, honouring any
+// `tbl->where_filter` push-down predicate. The WHERE fragment is trusted
+// (produced by engine::try_emit_sql_where, which constrains operators,
+// escapes string literals and only emits known functions), so it is spliced
+// into the SELECT verbatim — mirroring how the table name is here.
+util::Result<void> load_rowids(sqlite3* db, SqliteTable* tbl) {
+    std::string sql = "SELECT rowid FROM \"" + tbl->name + "\"";
+    if (!tbl->where_filter.empty()) {
+        sql += " WHERE (" + tbl->where_filter + ")";
+    }
+    sql += " ORDER BY rowid";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), static_cast<int>(sql.size()),
+                           &stmt, nullptr) != SQLITE_OK) {
+        return sqlite_error(db, "prepare rowid list");
+    }
+    tbl->rowids.clear();
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        tbl->rowids.push_back(sqlite3_column_int64(stmt, 0));
+    }
+    sqlite3_finalize(stmt);
+
+    tbl->cached_rec_count = static_cast<std::uint32_t>(tbl->rowids.size());
+    tbl->rec_count_cached = true;
+    tbl->positioned       = false;
+    tbl->row_valid        = false;
+    tbl->current_rowid    = 0;
+    tbl->current_deleted  = false;
+    tbl->pos              = 0;
+    return util::Result<void>{};
+}
+
+}  // namespace
+
 util::Result<std::unique_ptr<SqliteTable>>
 SqliteConnection::open_table(const std::string& table_name) {
 #if defined(OPENADS_WITH_SQLITE)
@@ -228,27 +278,9 @@ SqliteConnection::open_table(const std::string& table_name) {
     tbl->conn = this;
     tbl->name = table_name;
 
-    const std::string sql =
-        "SELECT rowid FROM \"" + table_name + "\" ORDER BY rowid";
-    sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(impl_->db, sql.c_str(),
-                           static_cast<int>(sql.size()),
-                           &stmt, nullptr) != SQLITE_OK) {
-        return sqlite_error(impl_->db, "prepare rowid list");
+    if (auto r = load_rowids(impl_->db, tbl.get()); !r) {
+        return r.error();
     }
-
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        tbl->rowids.push_back(sqlite3_column_int64(stmt, 0));
-    }
-    sqlite3_finalize(stmt);
-
-    tbl->cached_rec_count = static_cast<std::uint32_t>(tbl->rowids.size());
-    tbl->rec_count_cached = true;
-    tbl->positioned       = false;
-    tbl->row_valid        = false;
-    tbl->current_rowid    = 0;
-    tbl->current_deleted  = false;
-    tbl->pos              = 0;
 
     if (auto d = describe_table_impl(impl_->db, tbl.get()); !d) {
         return d.error();
@@ -259,6 +291,25 @@ SqliteConnection::open_table(const std::string& table_name) {
     (void)table_name;
     return util::Error{5004, 0,
                        "sqlite backend requires OPENADS_WITH_SQLITE=ON", ""};
+#endif
+}
+
+util::Result<void>
+SqliteConnection::set_filter(SqliteTable* tbl, const std::string& where) {
+#if defined(OPENADS_WITH_SQLITE)
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid sqlite set_filter", ""};
+    }
+    // Store the raw WHERE in the where_builder's aof_filter slot and
+    // produce the composed WHERE. The caller may later set additional
+    // restrictors (scope, for clause, etc.) on the builder before
+    // calling set_filter again.
+    tbl->where_builder.aof_filter = where;
+    tbl->where_filter = tbl->where_builder.build();
+    return load_rowids(impl_->db, tbl);   // reload the (filtered) rowid list
+#else
+    (void)tbl; (void)where;
+    return util::Error{5004, 0, "sqlite backend disabled", ""};
 #endif
 }
 
@@ -450,6 +501,8 @@ util::Result<void> SqliteConnection::read_field(SqliteTable* tbl,
             if (i >= tbl->current_row.size()) {
                 return util::Error{5001, 0, "row cache mismatch", ""};
             }
+            // Track column access for the field optimizer (learning mode).
+            tbl->field_optimizer.note_column_read(field_name);
             is_null = tbl->current_nulls[i];
             buf     = tbl->current_row[i];
             return util::Result<void>{};
@@ -535,6 +588,24 @@ util::Result<bool> SqliteConnection::seek_index(SqliteTable* tbl,
     (void)key;
     (void)soft;
     (void)last_key;
+    return util::Error{5004, 0, "sqlite backend disabled", ""};
+#endif
+}
+
+util::Result<void>
+SqliteConnection::exec_sql(const std::string& sql) {
+#if defined(OPENADS_WITH_SQLITE)
+    if (!valid()) return util::Error{5001, 0, "sqlite connection not open", ""};
+    char* err = nullptr;
+    const int rc = sqlite3_exec(impl_->db, sql.c_str(), nullptr, nullptr, &err);
+    if (rc != SQLITE_OK) {
+        std::string msg = err ? err : "exec failed";
+        sqlite3_free(err);
+        return util::Error{5001, 0, msg, sql};
+    }
+    return util::Result<void>{};
+#else
+    (void)sql;
     return util::Error{5004, 0, "sqlite backend disabled", ""};
 #endif
 }

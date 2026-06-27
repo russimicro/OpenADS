@@ -193,7 +193,7 @@ TEST_CASE("AdsContinue: walks filter-matching records in order") {
     fs::remove(p);
 }
 
-TEST_CASE("AdsSetAOF: non-optimisable AOF is rejected so the RDD filters client-side") {
+TEST_CASE("AdsSetAOF: non-optimisable AOF succeeds with OPTIMIZED_NONE") {
     auto p = make_fixture("badparse");
     auto dir = p.parent_path().string();
     auto base = p.filename().string();
@@ -208,26 +208,18 @@ TEST_CASE("AdsSetAOF: non-optimisable AOF is rejected so the RDD filters client-
                              nullptr, ADS_CDX, ADS_ANSI, 0, 0, 0,
                              &hT) == 0);
 
-        // UPPER(NAME) / Empty(NAME) are outside the optimisable AOF
-        // subset, so OpenADS cannot build a server-side filter. It must
-        // return a non-SUCCESS code: Harbour's rddads adsSetFilter keys
-        // its "is this filter server-optimised?" decision solely off
-        // AdsSetAOF's return value (it never calls AdsGetAOFOptLevel).
-        // On AE_SUCCESS it would skip its own client-side row filter and
-        // SET FILTER would be silently inert (whole table walked). The
-        // non-SUCCESS return makes the RDD fall back to client-side
-        // filtering, which is correct.
+        // Empty(NAME) is outside the optimisable AOF subset.
+        // Real ADS errors when it cannot build a server-side AOF,
+        // and stock rddads decides whether to run its own
+        // client-side row filter purely from AdsSetAOF's return
+        // value — it does NOT call AdsGetAOFOptLevel. So
+        // AdsSetAOF must return a non-success code here, causing
+        // rddads to fall back to client-side filtering.
         std::string cond = "Empty(NAME)";
         UNSIGNED32 rc = AdsSetAOF(hT,
                           reinterpret_cast<UNSIGNED8*>(cond.data()),
                           0);
-        CHECK(rc != 0);
-
-        // No AOF installed -> OPTIMIZED_NONE, and navigation is unfiltered
-        // (the RDD, not the engine, applies the row filter).
-        UNSIGNED16 lvl = 0xFFFF;
-        CHECK(AdsGetAOFOptLevel(hT, &lvl, nullptr, nullptr) == 0);
-        CHECK(lvl == ADS_OPTIMIZED_NONE);
+        CHECK(rc == AE_INVALID_EXPRESSION);
 
         AdsCloseTable(hT);
         AdsDisconnect(hConn);

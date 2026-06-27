@@ -293,6 +293,16 @@ struct SelectStmt {
     // skips that many surviving rows before counting toward limit.
     std::int64_t                  limit  = -1;
     std::int64_t                  offset = 0;
+
+    // M-UNION — UNION / UNION ALL support. Each member is a complete
+    // SELECT statement. When non-empty, the executor combines results
+    // from all members. ORDER BY / LIMIT apply to the final result.
+    struct UnionMember {
+        bool        all = false;   // true for UNION ALL, false for UNION (dedup)
+        std::string sql;           // original SQL of the member SELECT
+        std::unique_ptr<SelectStmt> parsed;  // parsed form of the member
+    };
+    std::vector<UnionMember>    unions;
 };
 
 util::Result<SelectStmt> parse_select(const std::string& sql);
@@ -381,6 +391,9 @@ bool sql_is_create_table(const std::string& sql);
 bool sql_is_create_index(const std::string& sql);
 bool sql_is_create_procedure(const std::string& sql);
 bool sql_is_execute_procedure(const std::string& sql);
+bool sql_is_alter_table(const std::string& sql);
+bool sql_is_drop_table(const std::string& sql);
+bool sql_is_drop_index(const std::string& sql);
 
 // M11.4 — `CREATE PROCEDURE <name> AS '<dll_path>::<symbol>'`.
 // Registers an external function; later invoked via EXECUTE PROCEDURE.
@@ -430,5 +443,51 @@ bool sql_is_revoke(const std::string& sql);
 util::Result<CreateDatabaseStmt> parse_create_database(const std::string& sql);
 util::Result<GrantStmt> parse_grant(const std::string& sql);
 util::Result<GrantStmt> parse_revoke(const std::string& sql);
+
+// M-ALTER — `ALTER TABLE <table> ADD COLUMN <col> <type> [(<len>[,<dec>])]`
+//          `ALTER TABLE <table> DROP COLUMN <col>`
+//          `ALTER TABLE <table> ALTER COLUMN <col> <type> [(<len>[,<dec>])]`
+struct AlterTableAction {
+    enum class Kind { AddColumn, DropColumn, AlterColumn };
+    Kind        kind = Kind::AddColumn;
+    std::string column;
+    // AddColumn / AlterColumn fields
+    std::string type;
+    std::uint32_t length   = 0;
+    std::uint32_t decimals = 0;
+};
+
+struct AlterTableStmt {
+    std::string                 table;
+    std::vector<AlterTableAction> actions;  // multiple actions: ALTER TABLE t ADD ... , DROP ...
+};
+
+util::Result<AlterTableStmt> parse_alter_table(const std::string& sql);
+
+// M-DROP — `DROP TABLE <table>`
+struct DropTableStmt {
+    std::string table;
+    bool        if_exists = false;
+};
+
+util::Result<DropTableStmt> parse_drop_table(const std::string& sql);
+
+// M-DROP — `DROP INDEX <tag> ON <table>` or `DROP INDEX <table>.<tag>`
+struct DropIndexStmt {
+    std::string table;
+    std::string tag;
+    bool        if_exists = false;
+};
+
+util::Result<DropIndexStmt> parse_drop_index(const std::string& sql);
+
+// M-UNION — `SELECT ... UNION [ALL] SELECT ... [ORDER BY ...] [LIMIT ...]`.
+// Parses the full statement including UNION members. The first SELECT is
+// stored as `result` and subsequent members in `result.unions`.
+// Returns error on syntax issues or if UNION members have mismatched columns.
+util::Result<SelectStmt> parse_select_with_unions(const std::string& sql);
+
+// Leading-keyword dispatch helper for AdsExecuteSQLDirect.
+bool sql_is_select(const std::string& sql);
 
 } // namespace openads::sql

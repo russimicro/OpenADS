@@ -4,6 +4,7 @@
 #include "util/result.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -60,5 +61,53 @@ std::string fox_numeric_key(double value);
 // stored key was built. Compound expressions keep their structure;
 // only the qualifier is removed (e.g. `UPPER(CUST->NAME)` -> `UPPER(NAME)`).
 std::string strip_alias_qualifiers(const std::string& expr);
+
+// ── Tier-2 SQL push-down (spike) ──────────────────────────────────────────
+//
+// Per-backend knobs for translating an xBase predicate into SQL. Defaults
+// target SQLite / PostgreSQL / Firebird (ANSI-ish). MySQL needs CONCAT() and
+// SUBSTRING(). Adjust now_fn, length_fn, etc. per dialect.
+struct SqlDialect {
+    std::string concat_op     = "||";       // xBase string '+'  (MySQL: CONCAT)
+    bool        use_concat_fn = false;       // a + b -> CONCAT(a, b)
+    std::string substr_fn     = "SUBSTR";    // SUBSTR(s, start [, len])
+    std::string alltrim_open  = "TRIM(";     // ALLTRIM(x) -> TRIM(x)
+    std::string alltrim_close = ")";
+    std::string length_fn     = "LENGTH";    // LEN(x) -> LENGTH(x) (or CHAR_LENGTH)
+    bool        use_char_length = false;     // true for MySQL/MariaDB
+    std::string now_fn        = "NOW()";     // DATE() -> NOW() or CURRENT_DATE
+    std::string true_literal  = "1";         // boolean true in SQL (some DBs use TRUE)
+    std::string false_literal = "0";         // boolean false in SQL
+};
+
+// Translate an xBase-style FOR / SET FILTER predicate into an equivalent SQL
+// boolean expression (a WHERE fragment), for tables backed by a SQL engine —
+// so the backend filters server-side instead of the engine scanning every row
+// and evaluating evaluate_index_expr_truthy() per record.
+//
+// Returns std::nullopt when ANY part of the expression falls outside the
+// safely-translatable subset (RECNO()/DELETED() — backend must handle
+// specially, REPLICATE/SPACE/STUFF/OCCURS — no portable SQL form, unknown
+// functions, or any construct without a portable SQL form). The caller then
+// filters with evaluate_index_expr_truthy() — so push-down is ALWAYS optional
+// and never changes the result set. Conservative by design: on any doubt it
+// declines rather than emit a predicate that could match the wrong rows.
+//
+// Supported subset:
+//   Operands: field/literal/number
+//   Comparisons: = == # != <> < <= > >=
+//   $ operator: 'needle' $ field → field LIKE '%needle%'
+//               field1 $ field2  → field2 LIKE '%' || field1 || '%'
+//   Logical: .AND. .OR. .NOT. / !  (also SQL AND/OR/NOT)
+//   Groups: ( expression )
+//   Concat: a + b → a || b  (or CONCAT(a, b))
+//   String: UPPER LOWER LTRIM RTRIM/TRIM ALLTRIM SUBSTR/SUBS LEFT RIGHT
+//           LEN AT/ATNUM PADR PADL PADC STRTRAN
+//   Numeric: INT/FLOOR ABS ROUND MOD CEILING CEIL EXP LOG LOG10 SQRT SIGN VAL STR
+//   Date: DATE TODAY NOW TIME DATETIME CTOD DTOC DTOS YEAR MONTH DAY HOUR MINUTE SECOND
+//         DOW CDOW CMONTH
+//   Conditional: IIF IF EMPTY ISNULL ISBLANK
+std::optional<std::string>
+    try_emit_sql_where(const std::string& expr, const SqlDialect& dialect = {});
 
 } // namespace openads::engine

@@ -176,13 +176,15 @@ TEST_CASE("AdsGetRecordCount ADS_RESPECTFILTERS with SET DELETED OFF returns phy
 }
 
 // ---------------------------------------------------------------------------
-// AdsSetRelation must return AE_FUNCTION_NOT_AVAILABLE, not AE_SUCCESS.
-// Callers must be able to detect that relation following is unavailable.
+// AdsSetRelation is implemented (see abi_set_relation_test.cpp for the
+// behavioural coverage). Here we only pin the argument validation: a null
+// expression and unknown handles must be rejected, not silently accepted.
 // ---------------------------------------------------------------------------
-TEST_CASE("AdsSetRelation returns AE_FUNCTION_NOT_AVAILABLE") {
-    // AdsSetRelation is not yet implemented. Verify it returns the proper
-    // "not available" error code so callers are not silently misled.
+TEST_CASE("AdsSetRelation rejects a null expression and unknown handles") {
     UNSIGNED32 rc = AdsSetRelation(0, 0, nullptr);
-    CHECK(rc == openads::AE_FUNCTION_NOT_AVAILABLE);
+    CHECK(rc != openads::AE_SUCCESS);
+
+    UNSIGNED8 expr[] = "CODE";
+    rc = AdsSetRelation(0, 0, expr);     // valid expr, bogus handles
     CHECK(rc != openads::AE_SUCCESS);
 }

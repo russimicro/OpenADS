@@ -11,10 +11,9 @@
 ;
 ; This file mirrors every export from openads_ace.def but applies the
 ; @N decoration so the x86 import lib generated from it is directly
-; linkable by Harbour's rddads.lib.  The DLL itself is still compiled
-; with __cdecl linkage — the decorated .def names simply tell the
-; import lib what symbol name to put in the COFF header so the
-; linker matches the @N-prefixed references from rddads.
+; linkable by Harbour's rddads.lib.  The DLL entry points are compiled
+; with __stdcall (WINAPI) on x86, so the names decorate naturally and
+; the import lib, DLL exports, and runtime calling convention all match.
 ;
 ; Parameter-size calculation (x86, 4-byte pointers):
 ;   UNSIGNED8* / void* / ADSHANDLE* / UNSIGNED16* / UNSIGNED32* /

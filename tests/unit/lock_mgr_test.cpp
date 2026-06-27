@@ -45,7 +45,7 @@ TEST_CASE("LockMgr Compatible/CDX record lock at 0x7FFFFFFE - recno") {
     fs::remove(p);
 }
 
-TEST_CASE("LockMgr re-entrant record lock from same handle is a no-op") {
+TEST_CASE("LockMgr re-entrant record lock keeps OS lock until final unlock") {
     auto p = fs::temp_directory_path() / "openads_m2_lock_reenter";
     fs::remove(p);
     {
@@ -59,6 +59,10 @@ TEST_CASE("LockMgr re-entrant record lock from same handle is a no-op") {
         auto b = mgr.lock_record_excl(f, TableTypeForLock::Cdx,
                                       LockingMode::Compatible, 42);
         REQUIRE(b.has_value());
+        CHECK_FALSE(mgr.unlock_record(f, TableTypeForLock::Cdx,
+                                      LockingMode::Compatible, 42));
+        CHECK(mgr.unlock_record(f, TableTypeForLock::Cdx,
+                                LockingMode::Compatible, 42));
     }
     fs::remove(p);
 }

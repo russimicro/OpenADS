@@ -22,6 +22,12 @@ namespace openads::engine {
 bool show_deleted() noexcept;
 void set_show_deleted(bool v) noexcept;
 
+bool set_exact() noexcept;
+void set_set_exact(bool v) noexcept;
+
+std::uint16_t epoch() noexcept;
+void set_epoch(std::uint16_t v) noexcept;
+
 
 enum class TableType { Cdx, Ntx, Adt, Vfp };
 enum class OpenMode  { Read, Shared, Exclusive };
@@ -41,6 +47,18 @@ public:
                                     LockingMode locking = LockingMode::Compatible);
 
     const std::string& path() const noexcept { return path_; }
+    const std::string& alias() const noexcept { return alias_; }
+    void set_alias(std::string a) noexcept { alias_ = std::move(a); }
+
+    OpenMode  open_mode()  const noexcept { return mode_; }
+    LockingMode locking_mode() const noexcept { return locking_; }
+
+    bool is_table_locked() const noexcept {
+        return table_lock_.has_value();
+    }
+    std::uint16_t lock_count() const noexcept {
+        return static_cast<std::uint16_t>(recno_locks_.size());
+    }
 
     // RI old-PK snapshot captured at navigation time and compared against
     // the dirty buffer in ri_enforce_update to decide cascade/restrict.
@@ -134,6 +152,23 @@ public:
     util::Result<void> mark_deleted();
     util::Result<void> recall_deleted();
     bool               is_deleted() const noexcept;
+
+    // True only when a concrete record is loaded (not BOF/EOF/Limbo).
+    bool positioned() const noexcept { return state_ == State::Positioned; }
+
+    // Raw physical record image of the current row, including the leading
+    // deletion-flag byte. Valid only while positioned(); empty otherwise.
+    // Backs AdsGetRecord.
+    const std::vector<std::uint8_t>& record_buffer() const noexcept {
+        return record_buf_;
+    }
+
+    // Overwrite the current record with a raw physical image (deletion flag
+    // + field bytes), then write back and re-sync every bound index. Copies
+    // min(len, record_length) bytes — a short buffer leaves the tail intact,
+    // matching ACE's tolerant AdsSetRecord. Backs AdsSetRecord.
+    util::Result<void> set_record_raw(const std::uint8_t* bytes,
+                                      std::size_t len);
 
     // Transaction rollback helpers (M5). Restore a before-image or undo
     // an append directly on disk and re-sync every bound index. Bypasses
@@ -231,14 +266,19 @@ public:
     // advance past non-matching records in their movement direction.
     using RowPredicate = std::function<bool(Table&)>;
     void set_filter(RowPredicate p)   { filter_ = std::move(p); }
+    void set_filter_expr(const std::string& e) { filter_expr_ = e; }
+    const std::string& filter_expr() const noexcept { return filter_expr_; }
     void clear_filter()                {
         filter_ = nullptr;
+        filter_expr_.clear();
+        aof_expr_.clear();
         // M-AOF.5: AOF also installs a recno sequence on the table
         // for the sparse-bitmap Skip path. Drop both in lockstep so
         // AdsClearAOF restores the full unfiltered walk.
         if (aof_active_) clear_recno_sequence();
         aof_active_ = false;
         aof_opt_level_ = 0;
+        aof_bitmap_.clear();
     }
     bool has_filter() const noexcept   { return static_cast<bool>(filter_); }
 
@@ -255,6 +295,9 @@ public:
         // owns it from this point on.
         aof_active_ = true;
         auto p = std::make_shared<std::vector<bool>>(std::move(bm));
+        // Keep a retained copy so AdsCustomizeAOF can flip individual
+        // record bits and reinstall without re-evaluating the filter.
+        aof_bitmap_ = *p;
         filter_ = [p](Table& t) -> bool {
             std::uint32_t r = t.recno();
             if (r == 0 || r > p->size()) return false;
@@ -276,6 +319,23 @@ public:
         set_recno_sequence(std::move(seq));
     }
     bool aof_active() const noexcept   { return aof_active_; }
+
+    // AdsCustomizeAOF — force a single record into (`include=true`) or out
+    // of (`include=false`) the active AOF result set. Flips its bit in the
+    // retained bitmap and reinstalls so the predicate and the sparse recno
+    // sequence stay consistent. Returns false if no AOF is active or the
+    // recno is invalid.
+    bool customize_aof_record(std::uint32_t recno, bool include) {
+        if (!aof_active_ || recno < 1) return false;
+        if (recno > record_count()) return false;
+        if (aof_bitmap_.size() < recno) aof_bitmap_.resize(recno, false);
+        aof_bitmap_[recno - 1] = include;
+        install_aof_bitmap(aof_bitmap_);   // rebuilds predicate + seq
+        return true;
+    }
+
+    void set_aof_expr(const std::string& e) { aof_expr_ = e; }
+    const std::string& aof_expr() const noexcept { return aof_expr_; }
 
     // M-AOF.4 — cached opt level reported by AdsGetAOFOptLevel. Set
     // by the ABI layer right after install_aof_bitmap so the answer
@@ -389,12 +449,16 @@ private:
     std::uint32_t                                 recno_  = 0;
     std::vector<std::uint8_t>                     record_buf_;
     std::string                                   path_;
+    std::string                                   alias_;
     std::unordered_map<std::string, std::string>  ri_snapshot_;
     bool                                          pending_append_ = false;
     bool                                          deferred_flush_ = false;
     bool                                          last_seek_found_ = false;
     bool                                          aof_active_      = false;
     int                                           aof_opt_level_   = 0;
+    std::string                                   filter_expr_;    // source filter expression string
+    std::string                                   aof_expr_;       // source AOF expression string
+    std::vector<bool>                             aof_bitmap_;     // retained AOF set for AdsCustomizeAOF
 
     // M10.6 recno-sequence cursor — empty means "natural order".
     std::vector<std::uint32_t>                    recno_sequence_;

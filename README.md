@@ -103,7 +103,7 @@ generated baseline; OpenADS clears every line of the regenerated
 ADS-flavoured baseline. The session that closed the last gap is
 recorded across 28 incremental commits ending at `28be1be`.
 
-**Current release: v1.2.2 (2026-06-24).** Full Data Dictionary
+**Current release: v1.4.0 (2026-06-26).** Full Data Dictionary
 engine enforcement, DA-Web management UI, SAP DD import, TCP
 remote server, SQL backends (PostgreSQL / MariaDB / MSSQL / ODBC /
 SQLite), and deferred-flush bulk-insert (528× speedup) are all in
@@ -126,6 +126,7 @@ Release timeline:
 
 | Tag       | Date       | Highlights |
 |-----------|------------|-----------|
+| **v1.4.0** | 2026-06-26 | **ADS dialect compat for ERP Harbour/FiveWin** — N-way comma join (3+ tables), `<alias>.*` wildcard, `UPPER()` in WHERE, table aliases, bracket free-table names, `{d}` temporal literals, constant folding. **CDX bulk-load index builder** (~10× faster `CREATE INDEX`), O(1) browse position cache, FOR-index persist+apply, flush-skip. **Wire: `FetchWhere`** server-side filtered scan. **Enterprise: sharded-reactor connection pool**, `EnterpriseConfig` singleton, session reaping + max-sessions. **SQL backends:** PostgreSQL column metadata via information_schema, stmt_map concurrency safety, SQLite WAL + busy-timeout, CREATE TABLE table type. **ADT:** correct companion stream count. xBase++ smoke test, FiveWin ORM cookbook. |
 | **v1.2.2** | 2026-06-24 | CDX empty-leaf walk fix (skip holes after `erase`); CDX leaf recno bits sized from `max_rec` + prefix-seek fix; MSSQL backward SKIP off-by-one; ABI typed getters + `AdsGetIndexHandle` for SQL backends; NTX numeric-key edge-case tests; CDX empty-tree + prefix-seek edge tests. Full suite **738/738**. |
 | **v1.2.1** | 2026-06-24 | NTX numeric key format fix — keys stored in native xBase zero-padded + complement form so native `dbSeek(<number>)` matches on-disk layout. adm_memo, codepage, maria_uri, postgres_uri, proc, sqlite_uri unit tests added. Remote benchmark docs (iMac WiFi 784K rec/s, SSH tunnel 676K rec/s). Suite 720/720. |
 | **v1.2.0** | 2026-06-24 | **Deferred-flush bulk-insert (528× speedup)** — `AdsSetDeferredFlush` / `AdsFlushFileBuffers`; 500K records in ~26s locally, 0.69s over WiFi tcp:// (784K rec/s). **MSSQL native TDS 7.4 backend** via `mssql://` URI with optional mbedTLS encryption. Suite 649/649. |
@@ -652,7 +653,7 @@ GetField → Skip → Disconnect`) round-trips end-to-end through a
 Windows-side client → remote Linux server over an SSH-forwarded
 TCP channel; ~9 ms server-side per op, the rest is real WAN RTT.
 
-### What works today (v1.0.0-rc29+)
+### What works today (v1.4.0)
 
 #### Engine
 
@@ -687,7 +688,11 @@ TCP channel; ~9 ms server-side per op, the rest is real WAN RTT.
   2 tags in one bag), branch descent (BE child pointers), `dbSeek`
   exact + soft, `dbGoTop` / `dbSkip` walks, auto-sync on every
   mutation across **all** bound tags (active + parked extras),
-  dynamic creation via `AdsCreateIndex61`.
+  dynamic creation via `AdsCreateIndex61`. Bulk-load index builder
+  (`build_bulk`) for ~10× faster `CREATE INDEX` on large tables.
+  O(1) browse position cache for `AdsGetRelKeyPos` / `AdsGetKeyNum`.
+  FOR-index predicates persist in the CDX sub-tag header and apply
+  at insert time (only matching records are indexed).
 - **NTX index** — Clipper layout, multi-level B+tree split (M9.10
   closed the M3.7 single-level limitation), cache-based in-order
   traversal for `next` / `prev` over multi-level trees, dynamic

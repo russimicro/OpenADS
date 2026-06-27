@@ -6,7 +6,7 @@ nav_order: 4
 permalink: /en/wire-protocol/
 ---
 
-# OpenADS Wire Protocol — v1.0.0-rc25
+# OpenADS Wire Protocol — v1.4.0
 
 This document specifies the OpenADS-native wire protocol spoken
 between an OpenADS client (`ace64.dll` opened with a
@@ -220,6 +220,10 @@ milestones reused gaps left by earlier ones.
 | `MgConnectAck`        | `0xA1` | S→C | Channel opened / reachability ack | M9.25 (rc24) |
 | `MgRequest`           | `0xA2` | C→S | Request a telemetry snapshot    | M9.25 (rc24) |
 | `MgReplyAck`          | `0xA3` | S→C | `MgSnapshot` payload            | M9.25 (rc24) |
+| `FetchWhere`          | `0xA4` | C→S | Server-side filtered batch scan | Tier-2 |
+| `FetchWhereAck`       | `0xA5` | S→C | Matching-row matrix + EOF flag  | Tier-2 |
+| `Aggregate`           | `0xA6` | C→S | Server-side COUNT/SUM/AVG/MIN/MAX | Tier-3 |
+| `AggregateAck`        | `0xA7` | S→C | One scalar per requested aggregate | Tier-3 |
 | `Error`               | `0xFF` | S→C | Any failure (4-byte ACE-code prefix since M12.10) | M12.3 |
 
 ## 5. Payload formats
@@ -391,9 +395,78 @@ functions and `tools/mgprobe` speak to a remote `openads_serverd`.
   server-initiated disconnects, high-water marks).
 - An unknown `MgRequestKind` is answered with `Error` (`0xFF`).
 
+### 5.22 FetchWhere / FetchWhereAck (Tier-2)
+
+Server-side filtered scan. Where `Fetch` (§5.7) returns every row in
+cursor order, `FetchWhere` evaluates a Clipper-style `FOR` predicate
+against each row **on the server** and returns only the matching rows.
+It walks the table from the cursor's current position until it has
+collected `max_rows` matches or hits EOF, leaving the cursor positioned
+past the last examined row so a follow-up `FetchWhere` resumes the scan.
+
+This collapses a `SET FILTER` / `COUNT FOR` / `LOCATE FOR` scan whose
+predicate falls outside the index-optimisable AOF subset (§5.17) — which
+a navigational client would otherwise satisfy by reading every record
+over the wire and filtering locally — down to `ceil(matches / max_rows)`
+round-trips.
+
+- `FetchWhere`:
+  `[u32 tid][u32 max_rows][u16 exprlen][expr][u8 ncols][per col: u8 nlen, name]`.
+  `expr` is the FOR-predicate text (e.g. `AGE > 40 .AND. CITY = 'RIO'`),
+  evaluated with the same engine evaluator used for CDX `FOR` index
+  conditions. It supports field / number / string-literal operands, the
+  comparison operators `== != <> # >= <= > < =`, the boolean operators
+  `.AND. .OR. .NOT.` (and `!`), and the key-expression functions
+  (`UPPER`, `LTRIM`, `STR`, `SUBSTR`, …). An empty or unparseable
+  predicate is permissive (every row passes), matching FOR-clause
+  semantics — so callers that need strict filtering should validate the
+  expression up front.
+- `FetchWhereAck`:
+  `[u32 nrows][u8 ncols][per row, per col: u16 vlen, val][u8 eof]`.
+  Identical row matrix to `FetchAck`, plus a trailing `eof` byte
+  (`1` = the scan reached end-of-table). Because the scan only stops
+  early on reaching `max_rows` matches, a batch with `nrows < max_rows`
+  always implies `eof == 1`.
+- **Base tables only.** A `FetchWhere` against a SQL cursor id
+  (from `ExecuteSQL`) returns `Error` — a SQL cursor already filters
+  server-side through its own `WHERE` clause.
+
+### 5.23 Aggregate / AggregateAck (Tier-3)
+
+Server-side aggregation. Where `FetchWhere` (§5.22) streams the matching
+rows back, `Aggregate` folds them **on the server** into scalar
+accumulators and returns only the results. The server scans the whole
+table once (independent of, and restoring, the cursor position),
+evaluates the `FOR` predicate per row with the same evaluator as §5.22,
+and feeds each match into the requested `COUNT` / `SUM` / `AVG` / `MIN` /
+`MAX` accumulators. This collapses a `COUNT FOR` / `SUM .. FOR` /
+`AVERAGE` / totalling report from one round-trip per matched row (or a
+whole `FetchWhere` row matrix) down to a **single** round-trip carrying
+just the scalars.
+
+- `Aggregate`:
+  `[u32 tid][u16 forlen][for_expr][u8 n_aggs][per agg: u8 fn_type, u8 nlen, field_name]`.
+  `for_expr` is the FOR predicate (empty = every row). `fn_type` is
+  `0=COUNT 1=SUM 2=AVG 3=MIN 4=MAX`; `field_name` is the column to fold
+  (`nlen = 0` ⇒ `COUNT(*)`). SUM/AVG use the field's numeric value;
+  MIN/MAX compare numerically for numeric field types and
+  lexicographically (raw bytes) otherwise. A request may carry several
+  aggregates so one scan answers `COUNT`+`SUM`+`MIN`+`MAX` together.
+- `AggregateAck`:
+  `[u8 n_aggs][per agg: u8 result_type, u16 vlen, val]`, one entry per
+  requested aggregate, same order. `result_type` is `0=empty/null`
+  (zero matched rows for AVG/MIN/MAX), `1=numeric` (ASCII decimal, parse
+  with `VAL()`), `2=string` (raw field bytes). `COUNT` and `SUM` over zero
+  rows return numeric `0`.
+- **Base tables only.** An `Aggregate` against a SQL cursor id returns
+  `Error` — a SQL cursor already aggregates through its own SQL.
+- **Capability-gated.** A client advertises `kCapAggregate` (`0x02`) in
+  the Connect capability word; it must only send `0xA6` to a server that
+  understands it (older servers never receive the frame).
+
 ## 6. Versioning
 
-- This spec covers OpenADS **v1.0.0-rc25**. Bumps append new
+- This spec covers OpenADS **v1.4.0**. Bumps append new
   opcodes and document them here without breaking existing ones.
 - Clients can probe the server version via `Hello` → the banner
   string is `openads/<semver>`.

@@ -6,26 +6,6 @@
 #include <cstring>
 #include <string>
 
-// M9.25 — AdsMg* now report real telemetry (backed by MgCollector).
-// A "local" AdsMgConnect yields an in-process backend that reports
-// 1 connection / 1 user; unknown handles are rejected.
-extern "C" {
-UNSIGNED32 AdsMgConnect(UNSIGNED8* pucServer, UNSIGNED8* pucUser,
-                        UNSIGNED8* pucPwd, ADSHANDLE* phMgmt);
-UNSIGNED32 AdsMgDisconnect(ADSHANDLE hMgmt);
-UNSIGNED32 AdsMgGetServerType(ADSHANDLE hMgmt, UNSIGNED16* pusType);
-UNSIGNED32 AdsMgGetInstallInfo(ADSHANDLE hMgmt, void* pStruct,
-                               UNSIGNED16* pusSize);
-UNSIGNED32 AdsMgGetActivityInfo(ADSHANDLE hMgmt, void* pStruct,
-                                UNSIGNED16* pusSize);
-UNSIGNED32 AdsMgGetUserNames(ADSHANDLE hMgmt, UNSIGNED8* pucFile,
-                             void* pBuf, UNSIGNED16* pusCount,
-                             UNSIGNED16* pusSize);
-UNSIGNED32 AdsMgKillUser(ADSHANDLE hMgmt, UNSIGNED8* pucUser,
-                         UNSIGNED16 usConnNo);
-UNSIGNED32 AdsMgResetCommStats(ADSHANDLE hMgmt);
-}  // extern "C"
-
 TEST_CASE("M9.25 AdsMgConnect (local) produces a real mgmt handle") {
     UNSIGNED8 srv[8] = "local";
     UNSIGNED8 usr[2] = "u";

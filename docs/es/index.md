@@ -1,4 +1,4 @@
----
+﻿---
 title: Inicio (ES)
 layout: default
 nav_order: 3
@@ -20,7 +20,7 @@ Release actual: **v1.1.0**.
 ## Contenido
 
 - **[Novedades](novedades/)** — resumen de cambios desde
-  v1.0.0-rc29 (driver SQLite, triggers, DA-Web, escritura ADI,
+  v1.0.0-rc29 → v1.5.0 (driver SQLite, triggers, DA-Web, escritura ADI,
   y más).
 - **[Historia del proyecto](historia/)** — cómo OpenADS creció
   desde un esqueleto mínimo hasta un motor completo compatible
@@ -58,6 +58,9 @@ Release actual: **v1.1.0**.
 - **[Compatibilidad de ordinales](ordinal-compat/)** — solucionar
   el error Win "no se encontró ordinal NNN" cuando la import
   table de la app referencia ordinales SAP.
+- **[Referencia API](api-reference/)** — 357 funciones `Ads*`
+  exportadas por `ace64.dll` / `libace.so` (conexiones, tablas,
+  índices, SQL, Data Dictionary, cifra, telemetría).
 - **[Issues conocidos](/OpenADS/known-issues/)** — items
   abiertos. *Disponible en inglés.*
 

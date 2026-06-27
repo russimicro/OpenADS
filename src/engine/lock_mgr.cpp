@@ -119,21 +119,27 @@ LockMgr::try_lock_record_excl(platform::File& f, TableTypeForLock t, LockingMode
     return LockHandle{std::move(bl).value(), off, 1};
 }
 
-void LockMgr::forget_(const Key& k) noexcept {
+bool LockMgr::unlock_table(platform::File& f, TableTypeForLock t, LockingMode m) {
+    Key k{&f, file_lock_offset(t, m)};
     auto it = held_.find(k);
-    if (it == held_.end()) return;
+    if (it == held_.end()) return false;
     if (--it->second <= 0) {
         held_.erase(it);
+        return true;
     }
+    return false;
 }
 
-void LockMgr::unlock_table(platform::File& f, TableTypeForLock t, LockingMode m) {
-    forget_(Key{&f, file_lock_offset(t, m)});
-}
-
-void LockMgr::unlock_record(platform::File& f, TableTypeForLock t, LockingMode m,
+bool LockMgr::unlock_record(platform::File& f, TableTypeForLock t, LockingMode m,
                             std::uint32_t recno) {
-    forget_(Key{&f, record_lock_offset(t, m, recno)});
+    Key k{&f, record_lock_offset(t, m, recno)};
+    auto it = held_.find(k);
+    if (it == held_.end()) return false;
+    if (--it->second <= 0) {
+        held_.erase(it);
+        return true;
+    }
+    return false;
 }
 
 } // namespace openads::engine

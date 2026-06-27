@@ -3,7 +3,7 @@
 // hand-rolled descent is clearer than a generator; it also keeps
 // error reporting line-precise without an external dep.
 //
-// Grammar (V1):
+// Grammar (V2):
 //   expr    := orExpr
 //   orExpr  := andExpr ( ("OR"|".OR.")  andExpr )*
 //   andExpr := notExpr ( ("AND"|".AND.") notExpr )*
@@ -12,6 +12,9 @@
 //   leaf    := IDENT op literal
 //            | IDENT "BETWEEN" literal "AND" literal
 //            | IDENT "IN" "(" literal ("," literal)* ")"
+//            | IDENT "LIKE" STRING
+//            | IDENT "IS" "NULL"
+//            | IDENT "IS" "NOT" "NULL"
 //   op      := "=" | "==" | "!=" | "<>" | "#" | "<" | "<=" | ">" | ">="
 //   literal := INT | REAL | STRING | "T"/"F"/".T."/".F."
 //
@@ -45,7 +48,7 @@ struct Token {
     enum class K {
         Ident, Number, String, Bool,
         Eq, Ne, Lt, Le, Gt, Ge,
-        And, Or, Not, Between, In,
+        And, Or, Not, Between, In, Like, Is,
         LParen, RParen, Comma,
         End,
     };
@@ -216,6 +219,8 @@ private:
         else if (up == "NOT")     { t.k = Token::K::Not; }
         else if (up == "BETWEEN") { t.k = Token::K::Between; }
         else if (up == "IN")      { t.k = Token::K::In;  }
+        else if (up == "LIKE")    { t.k = Token::K::Like; }
+        else if (up == "IS")      { t.k = Token::K::Is;   }
         else if (up == "TRUE" || up == "T") {
             t.k = Token::K::Bool; t.boolean = true;
         }
@@ -375,6 +380,45 @@ private:
             return make_leaf(std::move(leaf));
         }
 
+        // V2: LIKE 'pattern'
+        if (cur_.k == Token::K::Like) {
+            advance();
+            auto pat = parse_literal();
+            if (!pat) return pat.error();
+            leaf.op = Op::Like;
+            leaf.values.emplace_back(std::move(pat).value());
+            return make_leaf(std::move(leaf));
+        }
+
+        // V2: IS NULL / IS NOT NULL
+        if (cur_.k == Token::K::Is) {
+            advance();
+            if (cur_.k == Token::K::Not) {
+                advance();
+                // Expect NULL — but NULL is just an identifier we recognize
+                if (cur_.k != Token::K::Ident)
+                    return parse_err("expected NULL after IS NOT");
+                std::string null_kw = cur_.s;
+                for (auto& ch : null_kw) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+                if (null_kw != "NULL")
+                    return parse_err("expected NULL after IS NOT");
+                advance();
+                leaf.op = Op::IsNotNull;
+                return make_leaf(std::move(leaf));
+            } else {
+                // Expect NULL
+                if (cur_.k != Token::K::Ident)
+                    return parse_err("expected NULL after IS");
+                std::string null_kw = cur_.s;
+                for (auto& ch : null_kw) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+                if (null_kw != "NULL")
+                    return parse_err("expected NULL after IS");
+                advance();
+                leaf.op = Op::IsNull;
+                return make_leaf(std::move(leaf));
+            }
+        }
+
         Op op;
         switch (cur_.k) {
             case Token::K::Eq: op = Op::Eq; break;
@@ -405,6 +449,9 @@ const char* op_str(Op o) {
         case Op::Ge: return ">=";
         case Op::Between: return "BETWEEN";
         case Op::In: return "IN";
+        case Op::Like: return "LIKE";
+        case Op::IsNull: return "IS NULL";
+        case Op::IsNotNull: return "IS NOT NULL";
     }
     return "?";
 }
@@ -429,6 +476,11 @@ void to_string_rec(const Node& n, std::ostringstream& os) {
                 value_str(leaf->values[i], os);
             }
             os << ')';
+        } else if (leaf->op == Op::IsNull || leaf->op == Op::IsNotNull) {
+            // No value to print
+        } else if (leaf->op == Op::Like) {
+            os << ' ';
+            value_str(leaf->values[0], os);
         } else {
             os << ' ';
             value_str(leaf->values[0], os);

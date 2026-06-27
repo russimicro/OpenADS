@@ -46,6 +46,19 @@ TEST_CASE("aof_expr handles BETWEEN and IN leaves") {
           == "CITY IN ('NYC', 'LON', 'TOK')");
 }
 
+TEST_CASE("aof_expr LIKE support") {
+    CHECK(round_trip("NAME LIKE 'A%'")    == "NAME LIKE 'A%'");
+    CHECK(round_trip("NAME LIKE '%bob%'") == "NAME LIKE '%bob%'");
+    CHECK(round_trip("NAME LIKE 'A_B'")   == "NAME LIKE 'A_B'");
+}
+
+TEST_CASE("aof_expr IS NULL / IS NOT NULL") {
+    CHECK(round_trip("FLAG IS NULL")          == "FLAG IS NULL");
+    CHECK(round_trip("FLAG IS NOT NULL")      == "FLAG IS NOT NULL");
+    CHECK(round_trip("NAME IS NULL .AND. AGE > 18")
+          == "(NAME IS NULL AND AGE > 18)");
+}
+
 TEST_CASE("aof_expr combines leaves with AND / OR / NOT") {
     CHECK(round_trip("AGE > 18 .AND. AGE < 65")
           == "(AGE > 18 AND AGE < 65)");
@@ -63,8 +76,6 @@ TEST_CASE("aof_expr rejects unsupported constructs") {
     CHECK_FALSE(parse("UPPER(NAME) = 'BOB'"));
     // Arithmetic on the field side is also out of scope V1.
     CHECK_FALSE(parse("AGE + 1 > 30"));
-    // LIKE has its own bitmap path planned for V2 — refuse for now.
-    CHECK_FALSE(parse("NAME LIKE 'A%'"));
     // Trailing junk.
     CHECK_FALSE(parse("AGE = 30 GARBAGE"));
     // Missing operand.

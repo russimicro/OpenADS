@@ -1,0 +1,15 @@
+# OpenADS Harbour rddads smoke — hbmk2 project file
+# Usage:
+#   set OPENADS_LIB=C:\OpenADS\build\msvc-x64\src\Release
+#   hbmk2 -comp=msvc64 smoke.hbp
+#
+# OPENADS_LIB must point at the directory containing openace64.dll / ace64.lib.
+
+-cmp=msvc64
+-gt=cgi
+-inc={HB_INSTALL}\contrib\rddads
+-lib=rddads
+-L={OPENADS_LIB}
+-lib=ace64
+-lib=legacy_stdio_definitions
+-lib=oldnames

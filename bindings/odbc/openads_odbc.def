@@ -1,0 +1,34 @@
+; OpenADS ODBC driver — exported ODBC entry points (x64, undecorated names).
+LIBRARY openads_odbc
+EXPORTS
+    SQLAllocHandle
+    SQLFreeHandle
+    SQLFreeStmt
+    SQLSetEnvAttr
+    SQLSetConnectAttr
+    SQLGetConnectAttr
+    SQLSetStmtAttr
+    SQLGetStmtAttr
+    SQLDriverConnect
+    SQLConnect
+    SQLDisconnect
+    SQLExecDirect
+    SQLPrepare
+    SQLExecute
+    SQLBindParameter
+    SQLNumResultCols
+    SQLDescribeCol
+    SQLColAttribute
+    SQLBindCol
+    SQLFetch
+    SQLFetchScroll
+    SQLGetData
+    SQLRowCount
+    SQLMoreResults
+    SQLTables
+    SQLColumns
+    SQLPrimaryKeys
+    SQLGetTypeInfo
+    SQLGetInfo
+    SQLEndTran
+    SQLGetDiagRec

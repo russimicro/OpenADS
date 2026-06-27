@@ -4,6 +4,7 @@
 #include "sql_backend/sql_common.h"
 
 #include "openads/ace.h"
+#include "openads/error.h"
 
 #if !defined(OPENADS_WITH_ODBC)
 
@@ -23,6 +24,7 @@ namespace openads::sql_backend {}
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 
 namespace openads::sql_backend {
@@ -464,6 +466,7 @@ struct OdbcConnection::Impl {
     SQLHENV     env = SQL_NULL_HENV;
     SQLHDBC     dbc = SQL_NULL_HDBC;
     std::string quote;
+    std::string dbms_name;   // SQL_DBMS_NAME, e.g. "Microsoft SQL Server"
 };
 
 OdbcConnection::OdbcConnection() = default;
@@ -518,6 +521,15 @@ util::Result<OdbcConnection> OdbcConnection::open(const OdbcUri& uri) {
                                  &qlen))) {
         std::string qs(reinterpret_cast<const char*>(q));
         if (!qs.empty() && qs != " ") conn.impl_->quote = qs;
+    }
+
+    // DBMS name decides which lock primitive is available (only SQL Server has
+    // sp_getapplock); cache it once here rather than probing per lock call.
+    SQLCHAR     dn[256] = {0};
+    SQLSMALLINT dnlen   = 0;
+    if (SQL_SUCCEEDED(SQLGetInfo(conn.impl_->dbc, SQL_DBMS_NAME, dn,
+                                 static_cast<SQLSMALLINT>(sizeof(dn)), &dnlen))) {
+        conn.impl_->dbms_name.assign(reinterpret_cast<const char*>(dn));
     }
     return std::move(conn);
 }
@@ -950,6 +962,120 @@ util::Result<void> OdbcConnection::delete_record(OdbcTable* tbl) {
     tbl->rec_count_cached = true;
     tbl->positioned = false;
     tbl->row_valid  = false;
+    return util::Result<void>{};
+}
+
+// ---- rLock()/fLock() via SQL Server application locks --------------------
+namespace {
+
+bool is_sql_server(const std::string& dbms) {
+    return dbms.find("Microsoft SQL Server") != std::string::npos;
+}
+
+std::string odbc_hash_key(const std::string& s) {
+    std::uint64_t h = 1469598103934665603ULL;       // FNV-1a 64-bit
+    for (unsigned char c : s) { h ^= c; h *= 1099511628211ULL; }
+    static const char* hex = "0123456789abcdef";
+    char buf[17];
+    for (int i = 15; i >= 0; --i) { buf[i] = hex[h & 0xF]; h >>= 4; }
+    return std::string(buf, 16);
+}
+
+std::string odbc_record_lock_key(const OdbcTable& tbl, std::size_t pos) {
+    std::string k = "R\x1f" + tbl.name;
+    if (pos < tbl.pk_snapshot.size()) {
+        for (const std::string& v : tbl.pk_snapshot[pos].values) k += "\x1f" + v;
+    }
+    return odbc_hash_key(k);
+}
+
+std::string odbc_table_lock_key(const OdbcTable& tbl) {
+    return odbc_hash_key("T\x1f" + tbl.name);
+}
+
+// Run sp_getapplock / sp_releaseapplock and return the integer the proc yields:
+// >= 0 acquired/released, -1 not granted (timeout), other negatives are errors.
+// `key` is hex, so it embeds in the N'...' literal with no escaping.
+util::Result<int> odbc_applock(SQLHDBC dbc, const std::string& key, bool acquire) {
+    const std::string sql =
+        acquire
+            ? "DECLARE @r int; EXEC @r = sp_getapplock @Resource=N'" + key +
+              "', @LockMode='Exclusive', @LockOwner='Session', @LockTimeout=0; "
+              "SELECT @r;"
+            : "DECLARE @r int; EXEC @r = sp_releaseapplock @Resource=N'" + key +
+              "', @LockOwner='Session'; SELECT @r;";
+    std::vector<std::vector<std::string>> rows;
+    std::vector<std::vector<bool>>        nulls;
+    if (auto r = run_query(dbc, sql, rows, nulls); !r) return r.error();
+    if (rows.empty() || rows[0].empty()) {
+        return util::Error{5001, 0, "applock returned no value", ""};
+    }
+    return std::atoi(rows[0][0].c_str());
+}
+
+} // namespace
+
+util::Result<void> OdbcConnection::lock_record(OdbcTable* tbl,
+                                               std::uint32_t recno) {
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid odbc lock", ""};
+    }
+    if (!is_sql_server(impl_->dbms_name)) {
+        return util::Error{openads::AE_FUNCTION_NOT_AVAILABLE, 0,
+                           "record lock not supported for this ODBC backend", ""};
+    }
+    const std::size_t pos =
+        (recno == 0) ? tbl->pos : static_cast<std::size_t>(recno - 1);
+    if (pos >= tbl->pk_snapshot.size()) {
+        return util::Error{5026, 0, "no current record", ""};
+    }
+    auto r = odbc_applock(impl_->dbc, odbc_record_lock_key(*tbl, pos), true);
+    if (!r) return r.error();
+    if (r.value() < 0) return util::Error{5035, 0, "record locked", ""};
+    return util::Result<void>{};
+}
+
+util::Result<void> OdbcConnection::unlock_record(OdbcTable* tbl,
+                                                 std::uint32_t recno) {
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid odbc unlock", ""};
+    }
+    if (!is_sql_server(impl_->dbms_name)) {
+        return util::Error{openads::AE_FUNCTION_NOT_AVAILABLE, 0,
+                           "record lock not supported for this ODBC backend", ""};
+    }
+    const std::size_t pos =
+        (recno == 0) ? tbl->pos : static_cast<std::size_t>(recno - 1);
+    if (pos >= tbl->pk_snapshot.size()) return util::Result<void>{};
+    auto r = odbc_applock(impl_->dbc, odbc_record_lock_key(*tbl, pos), false);
+    if (!r) return r.error();
+    return util::Result<void>{};
+}
+
+util::Result<void> OdbcConnection::lock_table(OdbcTable* tbl) {
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid odbc lock", ""};
+    }
+    if (!is_sql_server(impl_->dbms_name)) {
+        return util::Error{openads::AE_FUNCTION_NOT_AVAILABLE, 0,
+                           "table lock not supported for this ODBC backend", ""};
+    }
+    auto r = odbc_applock(impl_->dbc, odbc_table_lock_key(*tbl), true);
+    if (!r) return r.error();
+    if (r.value() < 0) return util::Error{5035, 0, "table locked", ""};
+    return util::Result<void>{};
+}
+
+util::Result<void> OdbcConnection::unlock_table(OdbcTable* tbl) {
+    if (!valid() || tbl == nullptr) {
+        return util::Error{5001, 0, "invalid odbc unlock", ""};
+    }
+    if (!is_sql_server(impl_->dbms_name)) {
+        return util::Error{openads::AE_FUNCTION_NOT_AVAILABLE, 0,
+                           "table lock not supported for this ODBC backend", ""};
+    }
+    auto r = odbc_applock(impl_->dbc, odbc_table_lock_key(*tbl), false);
+    if (!r) return r.error();
     return util::Result<void>{};
 }
 

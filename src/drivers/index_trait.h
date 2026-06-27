@@ -37,6 +37,10 @@ public:
 
     virtual std::string name()       const = 0;
     virtual std::string expression() const = 0;
+    // FOR-clause predicate (CDX conditional tag). Empty = unconditional.
+    // Default empty; CdxIndex parses it from the on-disk sub-tag header so
+    // (re)build paths can re-apply the same filter the tag was created with.
+    virtual std::string condition()  const { return std::string{}; }
     virtual bool        descending() const = 0;
     virtual bool        unique()     const = 0;
     virtual std::uint16_t key_length() const = 0;

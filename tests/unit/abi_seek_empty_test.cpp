@@ -6,13 +6,6 @@
 
 namespace fs = std::filesystem;
 
-extern "C" {
-UNSIGNED32 AdsAtBOF(ADSHANDLE hTable, UNSIGNED16* pbAtBegin);
-UNSIGNED32 AdsAtEOF(ADSHANDLE hTable, UNSIGNED16* pbAtEnd);
-UNSIGNED32 AdsGetRecordNum(ADSHANDLE hTable, UNSIGNED16,
-                           UNSIGNED32* pulRec);
-}
-
 TEST_CASE("Seek empty key on empty CDX-indexed table reports Limbo") {
     auto dir = fs::temp_directory_path() / "openads_seek_empty";
     std::error_code ec;

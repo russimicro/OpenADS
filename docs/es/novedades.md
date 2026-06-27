@@ -6,7 +6,7 @@ nav_order: 0
 permalink: /es/novedades/
 ---
 
-# Novedades (v1.0.0-rc29 → v1.2.2)
+# Novedades (v1.0.0-rc29 → v1.5.0)
 
 Esta página resume los cambios más destacados desde la versión
 v1.0.0-rc29. Para el historial completo de commits, consulta el
@@ -191,24 +191,112 @@ ARIES-lite.
 - Control de acceso por tabla con niveles de permiso de
   usuario/grupo.
 
+### Agregación Server-Side (Tier-3)
+
+`AdsAggregate` ahora soporta `COUNT`, `SUM`, `AVG`, `MIN` y
+`MAX` con push-down a backends SQL (SQLite, PostgreSQL, MariaDB,
+ODBC). La spec de agregación se valida antes de ejecutar, y los
+resultados se sirven a través de un result set basado en handles
+(`AdsAggregateCount` / `AdsAggregateValue` /
+`AdsAggregateClose`).
+
+### FetchWhere V2
+
+`AdsFetchWhere` ahora sirve escaneos hacia adelante desde un
+result set cacheado — sin round-trip por coincidencia. El cliente
+recibe filas en lote y las recorre localmente, con recno por fila
+opcional (flag `WANT_RECNO`). Los escaneos masivos de `SET FILTER`
+sin AOF se enrutan a través de `AdsFetchWhere` con ganancias
+significativas de rendimiento.
+
+### Driver ODBC (slice 1–3)
+
+Un driver ODBC completo (`openads_odbc.dll`) está ahora disponible:
+
+- **Round-trip SELECT** con cursores scrollables
+  (`SQLFetchScroll`).
+- **Acceso tipado a columnas** — `SQLDescribeCol` /
+  `SQLColAttribute` / `SQLGetData` despachan a través del vtable
+  de ops del backend.
+- **Binding posicional de parámetros** vía `SQLBindParameter`.
+- **Funciones de catálogo** — `SQLPrimaryKeys` /
+  `system.primarykeys`.
+- **Emulación de app-lock** — `rLock()`/`fLock()` vía SQL Server
+  `sp_getapplock`, locks advisories de PostgreSQL, locks con nombre
+  de MariaDB y tabla `OPENADS$LOCKS` de Firebird.
+
+### Ruta de Escritura Nativa (PostgreSQL / MariaDB / Firebird)
+
+`AdsAppendRecord` / `AdsSetField` / `AdsWriteRecord` /
+`AdsDeleteRecord` ahora funcionan de extremo a extremo en
+backends PostgreSQL, MariaDB y Firebird — sin passthrough ODBC.
+
+### Expansión del Push-Down SQL
+
+Las expresiones de `SET FILTER` y AOF ahora se empujan a SQLite
+y PostgreSQL como cláusulas `WHERE` cuando el árbol de expresiones
+está dentro del subconjunto optimisable (`try_emit_sql_where`). La
+cobertura incluye `$` (contiene), `LEFT()`, `RIGHT()`,
+`SUBSTR()` y `UPPER()`.
+
+### Documentación Completa de la API (Portugués)
+
+Las **364 funciones ACE** están ahora documentadas en portugués
+(pt-BR) bajo `docs/pt/funcoes/`, cubriendo sintaxis, parámetros,
+valores de retorno y ejemplos.
+
+### Corrección de Calling Convention x86 (32-bit)
+
+`ENTRYPOINT` ahora es `__stdcall` (WINAPI) en Win32, coincidiendo
+con la convención de llamada de `rddads` de Harbour. Esto corrige
+la corrupción de stack cuando apps Harbour de 32-bit llaman a
+funciones ACE a través del DLL. El archivo `.def` de x86 y la
+librería de importación se actualizan para coincidir. (Reportado
+por Jonsson / RusSoft Ltda.)
+
+### CI — Build Leg msvc-x86
+
+Una nueva entrada de matrix `msvc-x86` en
+`.github/workflows/ci.yml` asegura que builds de 32-bit se
+prueben en cada PR, atrapando breakages exclusivos de x86
+(reducción dependiente de bitness, conflictos de firma `SQLLEN*`,
+advertencias `/WX`) antes de que lleguen a main.
+
 ---
 
 ## Correcciones de Errores
 
 ### Motor
 
+- **Orden de tags CDX** — `list_tags()` ahora ordena por offset
+  del tag-header (orden de creación) en lugar del orden alfabético
+  de la hoja. Corrige `DBSETORDER(n)` seleccionando el tag
+  incorrecto en bolsas CDX escritas por SAP ADS. (Reportado por
+  Jonsson / RusSoft Ltda.)
+- **Tamaño de clave de índice de expresión CDX** — las claves de
+  expresiones compuestas (p. ej. `UPPER(cName)`) ahora se dimensionan
+  desde el ancho fijo natural de la expresión, no desde la longitud
+  del contenido del primer registro. El antiguo rtrim truncaba
+  claves, causando filas fuera de orden tras reindex en tablas
+  grandes. (Reportado por Jonsson / RusSoft Ltda.)
 - **Caminado de hojas vacías CDX** — los caminados hacia adelante
   y hacia atrás del índice ahora saltan hojas vacías dejadas por
   `erase()`. Corrige `ADSCDX/5000` en REINDEX / borrado masivo.
   (PR #63)
 - **Bits de recno en hoja CDX** — `compute_layout` dimensiona el
   campo de número de registro desde `max_rec`, no solo la longitud
-  de clave, para que las tags con claves anchas (≥40 bytes) ya no
-  truncuen recnos ≥ 4096. (PR #62)
+  de clave, para que las tags con claves anchas ya no truncuen
+  recnos ≥ 4096. (PR #62)
 - **Búsqueda parcial CDX** — `seek_key` compara solo la longitud
   de la clave de búsqueda, para que búsquedas parciales como
   `SEEK "ART-00024800"` coincidan con claves almacenadas
   `"ART-00024800 desc ..."`. (PR #62)
+- **FOR condicional en campos lógicos** — el evaluador de
+  expresiones de índice ahora trata los campos lógicos como
+  numéricos (0/1) en lugar de cadenas truthy, para que `FOR ACTIVE`
+  filtre correctamente registros `.F.`. (PR #121)
+- **Corrupción por INDEX ON** — previene que `INDEX ON` corrompa
+  índices de la tabla fuente. (PR #118)
 - **SKIP hacia atrás MSSQL** — error por uno: `abs_n == pos` ahora
   llega a la fila 0 en lugar de reportar BOF. (PR #65)
 - **Getters tipados ABI para backends SQL** — `AdsGetDouble`/`Long`/
@@ -265,6 +353,25 @@ ARIES-lite.
   relativa prefija doble el directorio de la tabla.
 - **Vínculo de helpers trig** — vínculo C++ para helpers `trig_*`
   para silenciar MSVC C4190.
+- **Crash de `AdsGetField` en backends SQL** — leer por ordinal
+  de campo ya no falla.
+- **AdsGetRecordCount en ORDER condicional** — cuenta coincidencias
+  FOR correctamente. (PR #100)
+- **`AdsSetAOF` para filtros no optimizables** — ahora devuelve
+  `AE_INVALID_EXPRESSION` en lugar de éxito, para que rddads
+  stock caiga en filtrado del lado del cliente. El comportamiento
+  anterior deshabilitaba silenciosamente `SET FILTER` por completo.
+  (Reportado por Jonsson / RusSoft Ltda.)
+
+### Driver ODBC
+
+- **Build x86** — `C4100` (parámetro no usado) y `C2733`
+  (conflicto de firma `SQLLEN*` vs `SQLPOINTER`) corregidos para
+  32-bit MSVC `/WX`. (PR #119)
+- **Conformidad DM/ADO** — manejadores de descriptor, `SQLBindCol`
+  y mapeo de tipo `BIT` corregidos.
+- **`SQL_DRIVER_ODBC_VER` / `SQL_ODBC_VER`** — ahora se reportan
+  en `SQLGetInfo`.
 
 ### Seguridad DA-Web
 
@@ -341,17 +448,41 @@ ARIES-lite.
   titular seek-vs-scan. Un ejemplo CRUD `xbrowse` de FiveWin y guías
   de cadenas de conexión / tipos de campo / resolución de problemas
   lo completan.
+- **Referencia API (PT)** — las 364 funciones ACE documentadas en
+  portugués con sintaxis, parámetros, valores de retorno y ejemplos.
+
+---
+
+## Empaquetado
+
+- **Instalador Windows Inno Setup** (`openads-setup.iss`).
+- **Paquetes CPack** con `openace32.lib` / `openace64.lib`
+  garantizados en archivos Windows.
+- **Release CI** — `openace{32,64}.lib` se incluyen automáticamente
+  en archivos de release.
 
 ---
 
 ## Pruebas
 
-- **564 pruebas unitarias** pasando en todas las plataformas
-  (48 127 aserciones).
-- Nuevos archivos de prueba: `abi_adi_create_test.cpp` (creación
-  ADI, multi-tag, skip/seek poblado) y
-  `abi_adt_scope_validation_test.cpp` (creación desde cero,
-  búsqueda dual-tag, ida y vuelta de memo, stress append, wire
-  remoto, subproceso serverd).
-- Smoke test de índices NTX de Wilson agregado.
+- **874 pruebas unitarias** pasando en x64 y x86 (361 300+
+  aserciones).
+- Nuevos archivos de prueba: `abi_cdx_tag_order_test.cpp` (orden
+  de creación de tags CDX), `abi_cdx_expr_index_scale_test.cpp`
+  (tamaño de clave de índice de expresión a escala),
+  `abi_multitag_order_nav_test.cpp` (navegación multi-tag),
+  `abi_ntx_numeric_edge_test.cpp` (casos límite numéricos NTX),
+  `cdx_empty_tree_test.cpp` y más.
+- **CI x86** — build leg `msvc-x86` atrapa breakages de 32-bit
+  en cada PR.
 - Demo de Harbour en `examples/adt-native/` (por glokcode).
+
+---
+
+## Contribuidores
+
+- **Jonsson / RusSoft Ltda.** — correcciones de orden de tags CDX,
+  tamaño de clave de índice de expresión, filtro no optimizable de
+  `AdsSetAOF` y calling convention x86.
+- **Admnwk** — driver ODBC, push-down SQL, agregación,
+  FetchWhere V2, ruta de escritura nativa y mejoras de CI.

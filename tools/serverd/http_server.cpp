@@ -1130,7 +1130,7 @@ const char* host_compiler() {
 json server_info(const std::string& dir) {
     json out{
         {"engine",      "openads"},
-        {"version",     "1.0.0-rc3"},
+        {"version",     OPENADS_VERSION_STR},
         {"data_dir",    dir},
         {"http",        "studio.web.0.14"},
         {"os",          host_os()},

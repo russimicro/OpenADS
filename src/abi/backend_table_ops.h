@@ -1,6 +1,9 @@
 #pragma once
 
 #include "openads/ace.h"  // ADSHANDLE, UNSIGNED32, SIGNED32, UNSIGNED16, UNSIGNED8
+#include "engine/aggregate.h"  // engine::AggSpec / AggValue (Tier-3 push-down)
+
+#include <vector>
 
 namespace openads::abi {
 
@@ -26,6 +29,29 @@ struct BackendTableOps {
     UNSIGNED32 (*is_record_deleted)(ADSHANDLE, UNSIGNED16*);
     UNSIGNED32 (*open_index)       (ADSHANDLE, UNSIGNED8*, ADSHANDLE*, UNSIGNED16*);
     UNSIGNED32 (*is_found)         (ADSHANDLE, UNSIGNED16*);
+    // Tier-2 push-down: install (non-null) or clear (null) a SQL WHERE
+    // fragment so the backend filters rows server-side; navigation then walks
+    // only matching rows. Null when the backend can't push filters down.
+    UNSIGNED32 (*set_filter)       (ADSHANDLE, UNSIGNED8* /*where, null=clear*/);
+    // Tier-3 push-down: run COUNT/SUM/AVG/MIN/MAX over the rows matching
+    // `where_sql` (already-translated SQL, null = all rows) entirely in the
+    // backend (one `SELECT ... WHERE`), filling `out` with one value per spec.
+    // Null when the backend can't aggregate server-side (caller declines /
+    // falls back to a client-side totalling loop).
+    UNSIGNED32 (*aggregate)        (ADSHANDLE,
+                                    const char* /*where_sql, null=all*/,
+                                    const std::vector<openads::engine::AggSpec>*,
+                                    std::vector<openads::engine::AggValue>*);
+    // ── Transaction management (Tier 1, SQLRDD pattern) ─────────────
+    // begin_tx: begin a transaction (or SAVEPOINT when nested).
+    // commit_tx: commit (only fires actual COMMIT at nesting=0).
+    // rollback_tx: rollback (ROLLBACK at nesting=0, ROLLBACK TO at nesting>0).
+    // set_auto_commit: configure the auto-commit threshold (0=disabled).
+    // All null when the backend has no transaction support.
+    UNSIGNED32 (*begin_tx)         (ADSHANDLE);
+    UNSIGNED32 (*commit_tx)        (ADSHANDLE);
+    UNSIGNED32 (*rollback_tx)      (ADSHANDLE);
+    UNSIGNED32 (*set_auto_commit)  (ADSHANDLE, SIGNED32 /*threshold, 0=off*/);
 };
 
 }  // namespace openads::abi

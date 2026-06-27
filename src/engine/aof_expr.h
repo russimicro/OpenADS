@@ -15,17 +15,20 @@
 // ADS documentation. No GPL-licensed Harbour `contrib/rddbm/bmdbfx.c`
 // internals were read while authoring this file.
 //
-// Subset supported in V1:
+// Subset supported in V2:
 //   <field> OP <literal>     OP in { = == != <> < <= > >= }
 //   <field> BETWEEN a AND b
 //   <field> IN ( v1, v2, ... )
+//   <field> LIKE 'pattern'   (V2: % and _ wildcards)
+//   <field> IS NULL           (V2)
+//   <field> IS NOT NULL       (V2)
 //   <expr> AND <expr>        also `.AND.` (Clipper)
 //   <expr> OR  <expr>        also `.OR.`
 //   NOT <expr>               also `.NOT.` and `!`
 //   ( <expr> )
 //
-// Out of scope V1 (deliberately): function calls, arithmetic on
-// fields, LIKE / wildcard patterns, DESCEND-only sub-expressions.
+// Out of scope V2 (deliberately): function calls, arithmetic on
+// fields, DESCEND-only sub-expressions.
 // Anything we cannot parse falls back to "the whole AOF is a no-op
 // and AdsGetAOFOptLevel returns ADS_OPTIMIZED_NONE", matching the
 // pre-AOF behaviour exactly.
@@ -49,6 +52,9 @@ enum class Op {
     Ge,    // >=
     Between,
     In,
+    Like,       // V2: LIKE 'pattern' (% and _ wildcards)
+    IsNull,     // V2: IS NULL
+    IsNotNull,  // V2: IS NOT NULL
 };
 
 // A single literal value carried in a leaf. Strings keep their raw

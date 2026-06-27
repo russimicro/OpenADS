@@ -60,6 +60,7 @@ std::size_t parse_one_row(const std::vector<std::uint8_t>& pl,
     recno   = read_u32_le(&pl[pos]); pos += 4;
     deleted = (pl[pos++] != 0);
     std::uint16_t n = read_u16_le(&pl[pos]); pos += 2;
+    if (n > kMaxWireFields) return fail;
     fields.clear();
     fields.reserve(n);
     for (std::uint16_t i = 0; i < n; ++i) {
@@ -574,6 +575,151 @@ RemoteConnection::fetch_batch(std::uint32_t id,
         rows.push_back(std::move(row));
     }
     return rows;
+}
+
+util::Result<FetchWhereBatch>
+RemoteConnection::fetch_where(std::uint32_t id,
+                              std::uint32_t max_rows,
+                              const std::string& where_expr,
+                              const std::vector<std::string>& columns,
+                              std::uint8_t flags) {
+    if (columns.size() > 0xFFu) {
+        return util::Error{5000, 0,
+            "FetchWhere: too many columns (max 255)", ""};
+    }
+    if (where_expr.size() > 0xFFFFu) {
+        return util::Error{5000, 0,
+            "FetchWhere: predicate too long (max 65535)", ""};
+    }
+    Frame req;
+    req.opcode = Opcode::FetchWhere;
+    write_u32_le(id, req.payload);
+    write_u32_le(max_rows, req.payload);
+    req.payload.push_back(flags);       // new: flags byte at offset 8
+    req.payload.push_back(
+        static_cast<std::uint8_t>( where_expr.size()       & 0xFFu));
+    req.payload.push_back(
+        static_cast<std::uint8_t>((where_expr.size() >> 8) & 0xFFu));
+    req.payload.insert(req.payload.end(),
+                       where_expr.begin(), where_expr.end());
+    req.payload.push_back(static_cast<std::uint8_t>(columns.size()));
+    for (auto& c : columns) {
+        if (c.size() > 0xFFu) {
+            return util::Error{5000, 0,
+                "FetchWhere: column name too long (max 255)", c};
+        }
+        req.payload.push_back(static_cast<std::uint8_t>(c.size()));
+        req.payload.insert(req.payload.end(), c.begin(), c.end());
+    }
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FetchWhereAck ||
+        rep.value().payload.size() < 5) {
+        return util::Error{5000, 0, "FetchWhere: server error", ""};
+    }
+    const auto& pl = rep.value().payload;
+    std::size_t   p = 0;
+    std::uint32_t nrows = read_u32_le(pl.data() + p); p += 4;
+    std::uint8_t  ncols = pl[p++];
+    FetchWhereBatch batch;
+    batch.rows.reserve(nrows);
+    if (flags & FetchWhereFlags::WANT_RECNO)
+        batch.recnos.reserve(nrows);
+    for (std::uint32_t r = 0; r < nrows; ++r) {
+        // Per-row optional recno (emitted before column data).
+        if (flags & FetchWhereFlags::WANT_RECNO) {
+            if (p + 4 > pl.size()) {
+                return util::Error{5000, 0,
+                    "FetchWhere: truncated payload (recno)", ""};
+            }
+            std::uint32_t rn = read_u32_le(pl.data() + p); p += 4;
+            batch.recnos.push_back(rn);
+        }
+        std::vector<std::string> row;
+        row.reserve(ncols);
+        for (std::uint8_t c = 0; c < ncols; ++c) {
+            if (p + 2 > pl.size()) {
+                return util::Error{5000, 0,
+                    "FetchWhere: truncated payload (vlen)", ""};
+            }
+            std::uint16_t vlen = static_cast<std::uint16_t>(
+                static_cast<std::uint32_t>(pl[p]) |
+                (static_cast<std::uint32_t>(pl[p + 1]) << 8));
+            p += 2;
+            if (p + vlen > pl.size()) {
+                return util::Error{5000, 0,
+                    "FetchWhere: truncated payload (val)", ""};
+            }
+            row.emplace_back(reinterpret_cast<const char*>(pl.data() + p),
+                             vlen);
+            p += vlen;
+        }
+        batch.rows.push_back(std::move(row));
+    }
+    // Trailing [u8 eof] byte: 1 = the server walked to end of table.
+    if (p < pl.size()) {
+        batch.eof = (pl[p] != 0);
+    }
+    return batch;
+}
+
+util::Result<AggregateBatch>
+RemoteConnection::aggregate(std::uint32_t               id,
+                            const std::string&          for_expr,
+                            const std::vector<AggSpec>& specs) {
+    if (specs.size() > 0xFFu)
+        return util::Error{5000, 0,
+            "Aggregate: too many aggregates (max 255)", ""};
+    if (for_expr.size() > 0xFFFFu)
+        return util::Error{5000, 0,
+            "Aggregate: predicate too long (max 65535)", ""};
+    Frame req;
+    req.opcode = Opcode::Aggregate;
+    write_u32_le(id, req.payload);
+    req.payload.push_back(
+        static_cast<std::uint8_t>( for_expr.size()       & 0xFFu));
+    req.payload.push_back(
+        static_cast<std::uint8_t>((for_expr.size() >> 8) & 0xFFu));
+    req.payload.insert(req.payload.end(), for_expr.begin(), for_expr.end());
+    req.payload.push_back(static_cast<std::uint8_t>(specs.size()));
+    for (const auto& s : specs) {
+        if (s.field.size() > 0xFFu)
+            return util::Error{5000, 0,
+                "Aggregate: field name too long (max 255)", s.field};
+        req.payload.push_back(static_cast<std::uint8_t>(s.fn));
+        req.payload.push_back(static_cast<std::uint8_t>(s.field.size()));
+        req.payload.insert(req.payload.end(), s.field.begin(), s.field.end());
+    }
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::AggregateAck ||
+        rep.value().payload.empty())
+        return util::Error{5000, 0, "Aggregate: server error", ""};
+
+    const auto& pl = rep.value().payload;
+    std::size_t  p = 0;
+    std::uint8_t n = pl[p++];
+    AggregateBatch out;
+    out.values.reserve(n);
+    for (std::uint8_t i = 0; i < n; ++i) {
+        if (p + 3 > pl.size())
+            return util::Error{5000, 0,
+                "Aggregate: truncated payload (header)", ""};
+        std::uint8_t  rt   = pl[p++];
+        std::uint16_t vlen = static_cast<std::uint16_t>(
+            static_cast<std::uint32_t>(pl[p]) |
+            (static_cast<std::uint32_t>(pl[p + 1]) << 8));
+        p += 2;
+        if (p + vlen > pl.size())
+            return util::Error{5000, 0,
+                "Aggregate: truncated payload (value)", ""};
+        engine::AggValue v;
+        v.type = static_cast<engine::AggType>(rt);
+        v.bytes.assign(reinterpret_cast<const char*>(pl.data() + p), vlen);
+        p += vlen;
+        out.values.push_back(std::move(v));
+    }
+    return out;
 }
 
 util::Result<std::uint32_t>

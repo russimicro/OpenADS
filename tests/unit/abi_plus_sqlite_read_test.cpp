@@ -108,6 +108,57 @@ TEST_CASE("ABI Plus: sqlite read-only AdsOpenTable navigation") {
     fs::remove_all(dir, ec);
 }
 
+// Regression: rddads' adsGetValue() reads fields by ORDINAL, passing
+// ADSFIELD(n) -- a 1-based field number cast to a pointer, NOT a
+// NUL-terminated name. The SQL backends' get_field must resolve that
+// ordinal by index (as the metadata getters already do) instead of
+// running to_internal()/strlen() on the tiny pointer, which dereferences
+// invalid memory and crashes. Without this, USE+FieldGet from plain
+// Harbour over any SQL Plus backend access-violates on the first cell.
+TEST_CASE("ABI Plus: sqlite AdsGetField by ADSFIELD ordinal (rddads idiom)") {
+    const auto dir = fs::temp_directory_path() / "openads_plus_sqlite_ord";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    const auto db_path = dir / "app.db";
+    seed_db(db_path);
+
+    const std::string uri = "sqlite://" + db_path.string();
+    std::vector<UNSIGNED8> srv(uri.size() + 1);
+    std::memcpy(srv.data(), uri.c_str(), uri.size() + 1);
+
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv.data(), ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 tbl_name[32] = "clientes";
+    ADSHANDLE hTable = 0;
+    REQUIRE(AdsOpenTable(hConn, tbl_name, tbl_name,
+                         ADS_DEFAULT, 0, 0, 0, ADS_READONLY,
+                         &hTable) == 0);
+
+    REQUIRE(AdsGotoTop(hTable) == 0);
+
+    // Field 2 (nome) by ordinal -- must equal the by-name read, padded.
+    UNSIGNED8 buf[128] = {0};
+    UNSIGNED32 cap = sizeof(buf);
+    REQUIRE(AdsGetField(hTable, ADSFIELD(2), buf, &cap, 0) == 0);
+    const std::string nome(reinterpret_cast<const char*>(buf), cap);
+    CHECK(nome == std::string(64, ' ').replace(0, 3, "Ana"));
+
+    // Field 1 (id) by ordinal -- numeric value served as text.
+    UNSIGNED8 ibuf[64] = {0};
+    UNSIGNED32 icap = sizeof(ibuf);
+    REQUIRE(AdsGetField(hTable, ADSFIELD(1), ibuf, &icap, 0) == 0);
+    const std::string id(reinterpret_cast<const char*>(ibuf), icap);
+    CHECK(id == "1");
+
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+
+    fs::remove_all(dir, ec);
+}
+
 #else
 
 TEST_CASE("ABI Plus: sqlite backend disabled at compile time") {

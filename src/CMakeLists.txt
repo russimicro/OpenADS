@@ -22,6 +22,7 @@ add_library(openads_core STATIC
     platform/proc.cpp
     abi/ace_exports.cpp
     abi/ace_stubs.cpp
+    abi/openads_sql_c.cpp
     abi/last_error.cpp
     abi/charset.cpp
     abi/backend_registry.cpp
@@ -32,6 +33,8 @@ add_library(openads_core STATIC
     engine/lock_mgr.cpp
     engine/order.cpp
     engine/index_expr.cpp
+    engine/index_expr_sql.cpp
+    engine/aggregate.cpp
     engine/aof_expr.cpp
     engine/aof_eval.cpp
     engine/aes.cpp
@@ -53,12 +56,16 @@ add_library(openads_core STATIC
     drivers/dbt/dbt_memo.cpp
     drivers/fpt/fpt_memo.cpp
     network/wire.cpp
+    network/frame_reader.cpp
     network/server.cpp
+    network/session.cpp
+    network/worker_pool.cpp
     network/client.cpp
     mgmt/mg_collector.cpp
     network/mg_wire.cpp
     sql_backend/uri.cpp
     sql_backend/sql_common.cpp
+    sql_backend/enterprise_config.cpp
 )
 
 if(OPENADS_WITH_POSTGRESQL)

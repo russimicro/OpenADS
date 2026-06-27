@@ -2321,4 +2321,488 @@ util::Result<GrantStmt> parse_revoke(const std::string& sql) {
     return parse_grant_impl(sql, true);
 }
 
+// ── ALTER TABLE ───────────────────────────────────────────────────────────
+//
+// Supports:
+//   ALTER TABLE <table> ADD COLUMN <col> <type> [(<len>[,<dec>])]
+//   ALTER TABLE <table> DROP COLUMN <col>
+//   ALTER TABLE <table> ALTER COLUMN <col> <type> [(<len>[,<dec>])]
+//   Multiple actions: ALTER TABLE t ADD ..., DROP ...
+
+util::Result<AlterTableStmt> parse_alter_table(const std::string& sql) {
+    Cursor c(sql);
+    c.skip_ws();
+    c.skip_optimizer_hint();
+
+    if (!c.match_keyword("ALTER"))
+        return util::Error{7300, 0, "expected ALTER", sql};
+    if (!c.match_keyword("TABLE"))
+        return util::Error{7301, 0, "expected TABLE", sql};
+
+    AlterTableStmt stmt;
+    stmt.table = c.read_identifier_or_filename();
+    if (stmt.table.empty())
+        return util::Error{7302, 0, "expected table name", sql};
+
+    // Parse one or more actions
+    do {
+        c.skip_ws();
+        AlterTableAction action;
+
+        if (c.match_keyword("ADD")) {
+            action.kind = AlterTableAction::Kind::AddColumn;
+            c.match_keyword("COLUMN"); // optional
+        } else if (c.match_keyword("DROP")) {
+            action.kind = AlterTableAction::Kind::DropColumn;
+            c.match_keyword("COLUMN"); // optional
+        } else if (c.match_keyword("ALTER")) {
+            action.kind = AlterTableAction::Kind::AlterColumn;
+            c.match_keyword("COLUMN"); // optional
+        } else {
+            return util::Error{7303, 0, "expected ADD, DROP, or ALTER", sql};
+        }
+
+        action.column = c.read_identifier();
+        if (action.column.empty())
+            return util::Error{7304, 0, "expected column name", sql};
+
+        // For ADD and ALTER, parse the type
+        if (action.kind != AlterTableAction::Kind::DropColumn) {
+            c.skip_ws();
+            action.type = c.read_identifier();
+            if (action.type.empty())
+                return util::Error{7305, 0, "expected column type", sql};
+
+            // Optional (length, decimals)
+            if (c.match_char('(')) {
+                c.skip_ws();
+                std::string len_str;
+                while (c.peek_digit()) len_str.push_back(c.consume_char());
+                if (!len_str.empty()) action.length = static_cast<std::uint32_t>(std::stoul(len_str));
+
+                if (c.match_char(',')) {
+                    c.skip_ws();
+                    std::string dec_str;
+                    while (c.peek_digit()) dec_str.push_back(c.consume_char());
+                    if (!dec_str.empty()) action.decimals = static_cast<std::uint32_t>(std::stoul(dec_str));
+                }
+                if (!c.match_char(')'))
+                    return util::Error{7306, 0, "expected ')' after column definition", sql};
+            }
+        }
+
+        stmt.actions.push_back(std::move(action));
+
+        c.skip_ws();
+    } while (c.match_char(','));
+
+    return stmt;
+}
+
+bool sql_is_alter_table(const std::string& sql) {
+    Cursor c(sql);
+    c.skip_ws();
+    c.skip_optimizer_hint();
+    return c.peek_keyword("ALTER");
+}
+
+// ── DROP TABLE ────────────────────────────────────────────────────────────
+
+util::Result<DropTableStmt> parse_drop_table(const std::string& sql) {
+    Cursor c(sql);
+    c.skip_ws();
+    c.skip_optimizer_hint();
+
+    if (!c.match_keyword("DROP"))
+        return util::Error{7400, 0, "expected DROP", sql};
+    if (!c.match_keyword("TABLE"))
+        return util::Error{7401, 0, "expected TABLE", sql};
+
+    DropTableStmt stmt;
+    stmt.if_exists = c.match_keyword("IF");
+    if (stmt.if_exists) {
+        c.match_keyword("EXISTS"); // consume EXISTS
+    }
+
+    stmt.table = c.read_identifier_or_filename();
+    if (stmt.table.empty())
+        return util::Error{7402, 0, "expected table name", sql};
+
+    return stmt;
+}
+
+bool sql_is_drop_table(const std::string& sql) {
+    Cursor c(sql);
+    c.skip_ws();
+    c.skip_optimizer_hint();
+    return c.peek_keyword("DROP");
+}
+
+// ── DROP INDEX ────────────────────────────────────────────────────────────
+//
+// Supports:
+//   DROP INDEX <tag> ON <table>
+//   DROP INDEX <table>.<tag>
+//   DROP INDEX <tag> ON <table> IF EXISTS
+
+util::Result<DropIndexStmt> parse_drop_index(const std::string& sql) {
+    Cursor c(sql);
+    c.skip_ws();
+    c.skip_optimizer_hint();
+
+    if (!c.match_keyword("DROP"))
+        return util::Error{7500, 0, "expected DROP", sql};
+    if (!c.match_keyword("INDEX"))
+        return util::Error{7501, 0, "expected INDEX", sql};
+
+    DropIndexStmt stmt;
+    stmt.if_exists = c.match_keyword("IF");
+    if (stmt.if_exists) {
+        c.match_keyword("EXISTS"); // consume EXISTS
+    }
+
+    // Parse index name — could be "tag" or "table.tag"
+    std::string first = c.read_identifier();
+    if (first.empty())
+        return util::Error{7502, 0, "expected index name", sql};
+
+    // Check for table.tag notation
+    c.skip_ws();
+    if (c.match_char('.')) {
+        stmt.table = first;
+        stmt.tag = c.read_identifier();
+        if (stmt.tag.empty())
+            return util::Error{7503, 0, "expected tag name after '.'", sql};
+    } else if (c.match_keyword("ON")) {
+        stmt.tag = first;
+        stmt.table = c.read_identifier_or_filename();
+        if (stmt.table.empty())
+            return util::Error{7504, 0, "expected table name after ON", sql};
+    } else {
+        // Just a tag name — table not specified (error or default behavior)
+        return util::Error{7505, 0, "expected ON <table> or <table>.<tag>", sql};
+    }
+
+    return stmt;
+}
+
+bool sql_is_drop_index(const std::string& sql) {
+    Cursor c(sql);
+    c.skip_ws();
+    c.skip_optimizer_hint();
+    if (!c.peek_keyword("DROP")) return false;
+    // Skip past "DROP"
+    while (!c.eof()) {
+        char ch = c.consume_char();
+        if (std::isspace(static_cast<unsigned char>(ch))) break;
+    }
+    c.skip_ws();
+    return c.peek_keyword("INDEX");
+}
+
+// ── UNION / UNION ALL support ─────────────────────────────────────────────
+//
+// Parses: SELECT ... [UNION [ALL] SELECT ...] [ORDER BY ...] [LIMIT ...]
+//
+// The first SELECT is returned as the main SelectStmt. Subsequent members
+// are stored in `unions` vector. ORDER BY and LIMIT on the final result
+// are stored in the main SelectStmt's order_by/limit fields.
+
+namespace {
+
+// Find the position of UNION/UNION ALL keywords that are at the top level
+// (not inside parentheses or string literals). Returns a list of positions.
+std::vector<std::pair<std::size_t, bool>> find_unions(const std::string& sql) {
+    std::vector<std::pair<std::size_t, bool>> result;
+    std::size_t i = 0;
+    int paren_depth = 0;
+    char in_string = 0;
+
+    while (i < sql.size()) {
+        char c = sql[i];
+
+        // Track string literals
+        if (in_string) {
+            if (c == in_string && (i + 1 >= sql.size() || sql[i + 1] != in_string)) {
+                in_string = 0;
+            }
+            ++i;
+            continue;
+        }
+        if (c == '\'' || c == '"') {
+            in_string = c;
+            ++i;
+            continue;
+        }
+
+        // Track parentheses
+        if (c == '(') { ++paren_depth; ++i; continue; }
+        if (c == ')') { --paren_depth; ++i; continue; }
+
+        // Only look for UNION at top level
+        if (paren_depth == 0) {
+            // Check for UNION ALL
+            if (i + 9 <= sql.size()) {
+                bool match_all = true;
+                for (std::size_t k = 0; k < 5; ++k) {
+                    char a = static_cast<char>(std::tolower(static_cast<unsigned char>(sql[i + k])));
+                    char b = static_cast<char>(std::tolower(static_cast<unsigned char>("UNION"[k])));
+                    if (a != b) { match_all = false; break; }
+                }
+                if (match_all) {
+                    // Check for ALL after UNION
+                    std::size_t j = i + 5;
+                    while (j < sql.size() && std::isspace(static_cast<unsigned char>(sql[j]))) ++j;
+                    bool has_all = false;
+                    if (j + 3 <= sql.size()) {
+                        has_all = true;
+                        for (std::size_t k = 0; k < 3; ++k) {
+                            char a = static_cast<char>(std::tolower(static_cast<unsigned char>(sql[j + k])));
+                            char b = static_cast<char>(std::tolower(static_cast<unsigned char>("ALL"[k])));
+                            if (a != b) { has_all = false; break; }
+                        }
+                        if (has_all) {
+                            char after = sql[j + 3];
+                            if (std::isalnum(static_cast<unsigned char>(after)) || after == '_') {
+                                has_all = false;
+                            }
+                        }
+                    }
+
+                    // Check that UNION itself is a whole word
+                    char after_union = sql[i + 5];
+                    if (!std::isalnum(static_cast<unsigned char>(after_union)) && after_union != '_') {
+                        result.push_back({i, has_all});
+                        if (has_all) {
+                            i = j + 3;
+                        } else {
+                            i += 5;
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            // Just check for plain UNION
+            if (i + 5 <= sql.size()) {
+                bool match = true;
+                for (std::size_t k = 0; k < 5; ++k) {
+                    char a = static_cast<char>(std::tolower(static_cast<unsigned char>(sql[i + k])));
+                    char b = static_cast<char>(std::tolower(static_cast<unsigned char>("UNION"[k])));
+                    if (a != b) { match = false; break; }
+                }
+                if (match) {
+                    char after = sql[i + 5];
+                    if (!std::isalnum(static_cast<unsigned char>(after)) && after != '_') {
+                        // Make sure we don't double-count UNION ALL
+                        if (result.empty() || result.back().first != i) {
+                            result.push_back({i, false});
+                        }
+                    }
+                }
+            }
+        }
+        ++i;
+    }
+    return result;
+}
+
+// Parse ORDER BY and LIMIT from the tail of a UNION statement.
+// Called after the last UNION member to extract final result modifiers.
+void parse_union_tail(Cursor& c, SelectStmt& stmt) {
+    c.skip_ws();
+
+    // ORDER BY
+    if (c.match_keyword("ORDER")) {
+        if (!c.match_keyword("BY"))
+            return; // not a real ORDER BY, leave it
+        stmt.order_by = OrderBy{};
+        // First column
+        std::string col = c.read_identifier();
+        if (col.empty()) return;
+        bool desc = c.match_keyword("DESC");
+        stmt.order_by->column = col;
+        stmt.order_by->descending = desc;
+        // Additional columns
+        while (c.match_char(',')) {
+            col = c.read_identifier();
+            if (col.empty()) break;
+            desc = c.match_keyword("DESC");
+            stmt.order_by_extra.push_back({col, desc});
+        }
+    }
+
+    c.skip_ws();
+
+    // LIMIT
+    if (c.match_keyword("LIMIT")) {
+        c.skip_ws();
+        std::string num;
+        while (!c.eof() && c.peek_digit()) {
+            num.push_back(c.consume_char());
+        }
+        if (!num.empty()) {
+            stmt.limit = std::stoll(num);
+        }
+        c.skip_ws();
+        // OFFSET
+        if (c.match_keyword("OFFSET")) {
+            c.skip_ws();
+            std::string off;
+            while (!c.eof() && c.peek_digit()) {
+                off.push_back(c.consume_char());
+            }
+            if (!off.empty()) {
+                stmt.offset = std::stoll(off);
+            }
+        }
+    }
+}
+
+} // anonymous namespace
+
+util::Result<SelectStmt> parse_select_with_unions(const std::string& sql) {
+    auto unions = find_unions(sql);
+
+    if (unions.empty()) {
+        // No UNION — just a plain SELECT
+        return parse_select(sql);
+    }
+
+    // Parse the first SELECT (before the first UNION keyword)
+    std::string first_sql = sql.substr(0, unions[0].first);
+    // Trim trailing whitespace
+    while (!first_sql.empty() && std::isspace(static_cast<unsigned char>(first_sql.back()))) {
+        first_sql.pop_back();
+    }
+
+    auto first_result = parse_select(first_sql);
+    if (!first_result.has_value()) return first_result.error();
+
+    SelectStmt stmt = std::move(first_result.value());
+
+    // Parse each UNION member
+    for (std::size_t idx = 0; idx < unions.size(); ++idx) {
+        auto [pos, is_all] = unions[idx];
+
+        // Determine the end of this member's SQL
+        std::size_t start = pos + 5; // skip "UNION"
+        if (is_all) start += 4;      // skip " ALL"
+
+        std::size_t end;
+        if (idx + 1 < unions.size()) {
+            end = unions[idx + 1].first;
+        } else {
+            end = sql.size();
+        }
+
+        std::string member_sql = sql.substr(start, end - start);
+        // Trim
+        while (!member_sql.empty() && std::isspace(static_cast<unsigned char>(member_sql.front()))) {
+            member_sql.erase(member_sql.begin());
+        }
+        while (!member_sql.empty() && std::isspace(static_cast<unsigned char>(member_sql.back()))) {
+            member_sql.pop_back();
+        }
+
+        // Check if this is the last member — it may have ORDER BY / LIMIT
+        if (idx == unions.size() - 1) {
+            // Look for ORDER BY / LIMIT in the member SQL
+            Cursor tc(member_sql);
+            tc.skip_ws();
+            // Find ORDER BY or LIMIT position
+            std::size_t order_pos = std::string::npos;
+            std::size_t limit_pos = std::string::npos;
+            // Simple search — not inside strings/parens
+            {
+                int pd = 0;
+                char ins = 0;
+                for (std::size_t k = 0; k < member_sql.size(); ++k) {
+                    char ch = member_sql[k];
+                    if (ins) {
+                        if (ch == ins && (k + 1 >= member_sql.size() || member_sql[k + 1] != ins)) ins = 0;
+                        continue;
+                    }
+                    if (ch == '\'' || ch == '"') { ins = ch; continue; }
+                    if (ch == '(') { ++pd; continue; }
+                    if (ch == ')') { --pd; continue; }
+                    if (pd == 0) {
+                        // Check for ORDER
+                        if (k + 5 <= member_sql.size()) {
+                            bool match = true;
+                            for (std::size_t m = 0; m < 5; ++m) {
+                                char a = static_cast<char>(std::tolower(static_cast<unsigned char>(member_sql[k + m])));
+                                char b = static_cast<char>(std::tolower(static_cast<unsigned char>("ORDER"[m])));
+                                if (a != b) { match = false; break; }
+                            }
+                            if (match && k + 5 < member_sql.size()) {
+                                char after = member_sql[k + 5];
+                                if (!std::isalnum(static_cast<unsigned char>(after)) && after != '_') {
+                                    order_pos = k;
+                                }
+                            }
+                        }
+                        // Check for LIMIT
+                        if (k + 5 <= member_sql.size()) {
+                            bool match = true;
+                            for (std::size_t m = 0; m < 5; ++m) {
+                                char a = static_cast<char>(std::tolower(static_cast<unsigned char>(member_sql[k + m])));
+                                char b = static_cast<char>(std::tolower(static_cast<unsigned char>("LIMIT"[m])));
+                                if (a != b) { match = false; break; }
+                            }
+                            if (match && k + 5 < member_sql.size()) {
+                                char after = member_sql[k + 5];
+                                if (!std::isalnum(static_cast<unsigned char>(after)) && after != '_') {
+                                    limit_pos = k;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            std::size_t cut = member_sql.size();
+            if (order_pos < cut) cut = order_pos;
+            if (limit_pos < cut) cut = limit_pos;
+
+            std::string select_part = member_sql.substr(0, cut);
+            while (!select_part.empty() && std::isspace(static_cast<unsigned char>(select_part.back()))) {
+                select_part.pop_back();
+            }
+
+            auto member_result = parse_select(select_part);
+            if (!member_result.has_value()) return member_result.error();
+
+            SelectStmt::UnionMember member;
+            member.all = is_all;
+            member.sql = select_part;
+            member.parsed = std::make_unique<SelectStmt>(std::move(member_result.value()));
+            stmt.unions.push_back(std::move(member));
+
+            // Parse ORDER BY / LIMIT from the tail
+            std::string tail = member_sql.substr(cut);
+            Cursor tail_c(tail);
+            parse_union_tail(tail_c, stmt);
+        } else {
+            auto member_result = parse_select(member_sql);
+            if (!member_result.has_value()) return member_result.error();
+
+            SelectStmt::UnionMember member;
+            member.all = is_all;
+            member.sql = member_sql;
+            member.parsed = std::make_unique<SelectStmt>(std::move(member_result.value()));
+            stmt.unions.push_back(std::move(member));
+        }
+    }
+
+    return stmt;
+}
+
+bool sql_is_select(const std::string& sql) {
+    Cursor c(sql);
+    c.skip_ws();
+    c.skip_optimizer_hint();
+    return c.peek_keyword("SELECT");
+}
+
 } // namespace openads::sql

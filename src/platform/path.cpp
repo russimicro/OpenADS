@@ -54,4 +54,43 @@ std::string resolve_case_insensitive(const std::string& path) {
     return path;
 }
 
+namespace {
+
+bool path_has_prefix(const std::string& path, const std::string& root) {
+    if (root.empty()) return true;
+    if (path.size() < root.size()) return false;
+    if (path.compare(0, root.size(), root) != 0) return false;
+    if (path.size() == root.size()) return true;
+    const char next = path[root.size()];
+    return next == '/' || next == '\\';
+}
+
+} // namespace
+
+std::optional<std::string> resolve_under_root(const std::string& root,
+                                              const std::string& client_path) {
+    namespace fs = std::filesystem;
+    if (client_path.empty()) return std::nullopt;
+
+    std::error_code ec;
+    fs::path root_p = root.empty()
+        ? fs::current_path(ec)
+        : fs::absolute(fs::path(root), ec);
+    if (ec) return std::nullopt;
+
+    fs::path client_p(client_path);
+    fs::path combined = client_p.is_absolute() ? client_p : (root_p / client_p);
+
+    fs::path canon = fs::weakly_canonical(combined, ec);
+    if (ec) return std::nullopt;
+
+    fs::path root_canon = fs::weakly_canonical(root_p, ec);
+    if (ec) root_canon = root_p.lexically_normal();
+
+    const std::string canon_s = canon.generic_string();
+    const std::string root_s  = root_canon.generic_string();
+    if (!path_has_prefix(canon_s, root_s)) return std::nullopt;
+    return canon_s;
+}
+
 } // namespace openads::platform

@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "engine/data_dict.h"
 #include "openads/ace.h"
 #include "openads/error.h"
 
@@ -7,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -178,8 +180,23 @@ TEST_CASE("ABI SQL: parse error on unsupported syntax") {
 namespace {
 
 void write_dd_smoke(const fs::path& p, const std::string& body) {
-    std::ofstream f(p);
-    f << "# OpenADS Data Dictionary v1\n" << body;
+    auto res = openads::engine::DataDict::create(p.string());
+    if (!res) return;
+    auto dd = std::move(res).value();
+    std::istringstream ss(body);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (line.rfind("TABLE ", 0) == 0) {
+            auto eq = line.find('=', 6);
+            if (eq != std::string::npos) {
+                std::string alias = line.substr(6, eq - 6);
+                std::string tpath = line.substr(eq + 1);
+                dd.add_table(alias, tpath);
+            }
+        } else if (line.rfind("USER ", 0) == 0) {
+            dd.create_user(line.substr(5));
+        }
+    }
 }
 
 void make_dbf0_smoke(const fs::path& path) {

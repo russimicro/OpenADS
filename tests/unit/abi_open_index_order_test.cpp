@@ -6,11 +6,6 @@
 
 namespace fs = std::filesystem;
 
-extern "C" {
-UNSIGNED32 AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
-                        ADSHANDLE* ahIndex, UNSIGNED16* pu16ArrayLen);
-}
-
 TEST_CASE("AdsOpenIndex returns ahIndex in CDX struct-tag insertion order") {
     auto dir = fs::temp_directory_path() / "openads_oi";
     std::error_code ec;

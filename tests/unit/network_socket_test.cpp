@@ -2,6 +2,7 @@
 #include "network/socket.h"
 #include "network/wire.h"
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -21,6 +22,9 @@ using openads::network::Frame;
 using openads::network::Opcode;
 using openads::network::encode_frame;
 using openads::network::decode_frame;
+using openads::network::PollItem;
+using openads::network::PollEvent;
+using openads::network::socket_poll;
 
 TEST_CASE("M12.2 listen / connect / send / recv round-trip a frame") {
     ListenerOptions opts;
@@ -73,4 +77,87 @@ TEST_CASE("M12.2 listen / connect / send / recv round-trip a frame") {
     std::string got(dec.value().payload.begin(),
                     dec.value().payload.end());
     CHECK(got == hello);
+}
+
+TEST_CASE("socket_poll reports a readable socket and times out cleanly") {
+    auto l = listen_tcp({"127.0.0.1", 0, 16});
+    REQUIRE(l.has_value());
+    auto port = socket_local_port(l.value());
+    REQUIRE(port.has_value());
+    auto c = connect_tcp("127.0.0.1", port.value());
+    REQUIRE(c.has_value());
+    auto a = accept_one(l.value());
+    REQUIRE(a.has_value());
+    Socket cs = c.value();
+    Socket as = a.value();
+
+    // Nothing sent yet: poll on the accepted socket times out (0 ready).
+    {
+        std::vector<PollItem> items{
+            {as, static_cast<std::uint8_t>(PollEvent::Readable)}};
+        auto n = socket_poll(items, 100);
+        REQUIRE(n.has_value());
+        CHECK(n.value() == 0);
+        CHECK((items[0].events &
+               static_cast<std::uint8_t>(PollEvent::Readable)) == 0);
+    }
+
+    // Send a byte from the client; the accepted socket becomes readable.
+    const std::uint8_t msg[1] = {42};
+    auto sent = sock_send(cs, msg, 1);
+    REQUIRE(sent.has_value());
+    {
+        std::vector<PollItem> items{
+            {as, static_cast<std::uint8_t>(PollEvent::Readable)}};
+        auto n = socket_poll(items, 1000);
+        REQUIRE(n.has_value());
+        CHECK(n.value() == 1);
+        CHECK((items[0].events &
+               static_cast<std::uint8_t>(PollEvent::Readable)) != 0);
+    }
+
+    sock_close(cs);
+    sock_close(as);
+    sock_close(l.value());
+}
+
+TEST_CASE("socket_set_nonblocking makes an idle recv report would-block") {
+    ListenerOptions o;
+    o.host = "127.0.0.1";
+    o.port = 0;
+    auto lis = listen_tcp(o);
+    REQUIRE(lis.has_value());
+    auto port = socket_local_port(lis.value());
+    REQUIRE(port.has_value());
+    auto p = port.value();
+
+    // Client connects but stays quiet for a beat, then sends one byte.
+    std::thread client([&]() {
+        auto c = connect_tcp("127.0.0.1", p);
+        if (!c) return;
+        Socket cs = c.value();
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        std::uint8_t b = 0x42;
+        (void)sock_send(cs, &b, 1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        sock_close(cs);
+    });
+
+    Socket listener = lis.value();
+    auto acc = accept_one(listener);
+    REQUIRE(acc.has_value());
+    Socket s = acc.value();
+
+    REQUIRE(openads::network::socket_set_nonblocking(s, true).has_value());
+
+    // Nothing sent yet: recv must return a would-block error (not block, not a
+    // fatal error). If set_nonblocking were a no-op this recv would hang.
+    std::uint8_t buf[8];
+    auto r = sock_recv(s, buf, sizeof(buf));
+    CHECK_FALSE(r.has_value());
+    CHECK(openads::network::socket_recv_would_block(r.error()));
+
+    client.join();
+    sock_close(s);
+    sock_close(listener);
 }

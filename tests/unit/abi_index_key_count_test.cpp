@@ -17,14 +17,6 @@
 
 namespace fs = std::filesystem;
 
-extern "C" {
-UNSIGNED32 AdsShowDeleted(UNSIGNED16 bShowDeleted);
-UNSIGNED32 AdsDeleteRecord(ADSHANDLE hTable);
-UNSIGNED32 AdsGotoRecord(ADSHANDLE hTable, UNSIGNED32 ulRecordNum);
-UNSIGNED32 AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 usFilterOption,
-                          UNSIGNED32* pulCount);
-}
-
 TEST_CASE("AdsGetKeyCount returns entry count matching inserted records") {
     auto dir = fs::temp_directory_path() / "openads_keycount";
     std::error_code ec;

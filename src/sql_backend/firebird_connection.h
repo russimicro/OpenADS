@@ -66,6 +66,17 @@ public:
     util::Result<void> flush_record(FirebirdTable* tbl);
     util::Result<void> delete_record(FirebirdTable* tbl);
 
+    // rLock()/fLock() emulated with a lock table (OPENADS$LOCKS) since Firebird
+    // has no advisory-lock primitive: INSERT a unique key to acquire (a PK
+    // violation means another attachment holds it), DELETE to release. Each runs
+    // in its own short transaction so it is visible cross-attachment at once and
+    // never disturbs the data transaction. recno is the 1-based ACE record
+    // number (0 = current). Held keys are released on disconnect.
+    util::Result<void> lock_record(FirebirdTable* tbl, std::uint32_t recno);
+    util::Result<void> unlock_record(FirebirdTable* tbl, std::uint32_t recno);
+    util::Result<void> lock_table(FirebirdTable* tbl);
+    util::Result<void> unlock_table(FirebirdTable* tbl);
+
     // AdsExecuteSQLDirect passthrough: run any statement. Returns a navigable
     // cursor when the statement produces a result set, or nullptr for DML/DDL.
     util::Result<std::unique_ptr<FirebirdTable>> run_sql(const std::string& sql);

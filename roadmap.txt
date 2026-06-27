@@ -1,6 +1,6 @@
 OpenADS — Roadmap Status
-As of: 2026-06-02
-Current release: v1.0.0-rc29 (2026-05-26)
+As of: 2026-06-26
+Current release: v1.4.0 (2026-06-26)
 
 ================================================================================
 PHASES COMPLETED
@@ -127,10 +127,13 @@ Currently at: v1.0.0-rc29. The 1.0.x milestone defined in the roadmap requires:
 2. Connection multiplexing / session hardening
    - Current server: one thread per client connection, simple per-session
      state. Needs:
-     a. Connection pool / multiplexing so many short-lived Studio or
-        PHP client connections don't exhaust threads.
-     b. Graceful timeout and cleanup for abandoned sessions.
-     c. Load testing / stress: many concurrent clients, large result sets.
+   a. Connection pool / multiplexing so many short-lived Studio or
+      PHP client connections don't exhaust threads. [DONE — WorkerPool
+      sharded-reactor pool (v1.4.0, default OFF via OPENADS_SERVER_POOL)]
+   b. Graceful timeout and cleanup for abandoned sessions. [DONE —
+      session reaping + max-sessions cap (v1.4.0)]
+   c. Load testing / stress: many concurrent clients, large result sets.
+      [DONE — tools/stress/remote_random_main.cpp + remote_concurrency_main.cpp]
 
 3. Compatibility test matrix against Advantage 11.x + 12.x
    - Steps:
@@ -295,9 +298,9 @@ FEATURE 3 (LOW): Studio AOF features in DA-Web
   - Identify which AOF features (filter install, OptLevel display, CREATE INDEX
     hint chips) can be adapted into DA-Web's table browser.
 
-MAINTENANCE 1: openads_serverd smart DLL detection
-  - Server should detect whether ace64.dll or openace64.dll is present and
-    load whichever is available, rather than requiring a fixed name.
+MAINTENANCE 1: [DONE 2026-06-24] openads_serverd smart DLL detection
+  - tools/serverd/main.cpp probe_ace_dlls() checks openace64.dll, ace64.dll,
+    openace32.dll, ace32.dll (exe dir + cwd) and warns on non-OpenADS builds.
 
 MAINTENANCE 2: Cross-platform build verification
   - Confirm the full source tree builds on Linux and macOS following existing

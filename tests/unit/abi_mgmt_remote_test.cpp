@@ -7,12 +7,6 @@
 #include <string>
 #include <vector>
 
-extern "C" {
-UNSIGNED32 AdsMgConnect(UNSIGNED8*, UNSIGNED8*, UNSIGNED8*, ADSHANDLE*);
-UNSIGNED32 AdsMgDisconnect(ADSHANDLE);
-UNSIGNED32 AdsMgGetActivityInfo(ADSHANDLE, void*, UNSIGNED16*);
-}
-
 TEST_CASE("M9.25 AdsMgGetActivityInfo over the wire sees a live session") {
     using openads::network::Server;
     Server srv;

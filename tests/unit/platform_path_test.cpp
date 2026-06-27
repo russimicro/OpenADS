@@ -7,6 +7,7 @@
 
 namespace fs = std::filesystem;
 using openads::platform::resolve_case_insensitive;
+using openads::platform::resolve_under_root;
 
 TEST_CASE("Case-insensitive resolve returns existing path verbatim") {
     const auto dir = fs::temp_directory_path() / "openads_path_t1";
@@ -41,4 +42,26 @@ TEST_CASE("Case-insensitive resolve returns input on miss") {
     CHECK(resolved == missing);
 
     fs::remove_all(dir);
+}
+
+TEST_CASE("resolve_under_root keeps relative paths inside jail") {
+    const auto root = fs::temp_directory_path() / "openads_path_jail";
+    const auto sub  = root / "data";
+    fs::create_directories(sub);
+
+    auto resolved = resolve_under_root(root.string(), "data");
+    REQUIRE(resolved.has_value());
+    CHECK(fs::path(*resolved).filename() == "data");
+
+    fs::remove_all(root);
+}
+
+TEST_CASE("resolve_under_root rejects parent traversal") {
+    const auto root = fs::temp_directory_path() / "openads_path_escape";
+    fs::create_directories(root);
+
+    auto resolved = resolve_under_root(root.string(), "..");
+    CHECK_FALSE(resolved.has_value());
+
+    fs::remove_all(root);
 }

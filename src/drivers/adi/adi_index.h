@@ -123,6 +123,11 @@ public:
         std::uint32_t adt_hdr_len = 0;   // ADT header length (bytes 32..35)
         std::uint32_t adt_rec_len = 0;   // ADT record length
         bool          unique      = false;
+        // Full path of the ADT table this index belongs to. Required for a
+        // NON-STRUCTURAL bag, whose .adi stem differs from the table's (the
+        // `INDEX ON ... TAG ... TO <other path>` form). When empty, the
+        // companion ADT path is derived from the .adi stem (structural bag).
+        std::string   adt_path;
     };
 
     // Build a fresh 7-page .adi matching the legacy single-tag layout
@@ -141,13 +146,17 @@ public:
     // CREATE INDEX overwrite can rebuild from scratch.
     util::Result<void> clear_data();
 
-    // Multi-tag API (mirrors CdxIndex)
+    // Multi-tag API (mirrors CdxIndex). adt_path is the owning table's path;
+    // when empty the companion ADT is derived from the .adi stem (structural
+    // bag), otherwise it is used as-is (non-structural / separate bag).
     static util::Result<std::vector<std::string>>
-        list_tags(const std::string& adi_path);
+        list_tags(const std::string& adi_path,
+                  const std::string& adt_path = {});
 
     util::Result<void> open_named(const std::string& adi_path,
                                   IndexOpenMode       mode,
-                                  const std::string&  field_name);
+                                  const std::string&  field_name,
+                                  const std::string&  adt_path = {});
 
 private:
     // Read / write a 512-byte page from/to the ADI file

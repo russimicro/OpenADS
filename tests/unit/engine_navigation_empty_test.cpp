@@ -10,15 +10,6 @@
 
 namespace fs = std::filesystem;
 
-extern "C" {
-UNSIGNED32 AdsGotoTop(ADSHANDLE hTable);
-UNSIGNED32 AdsGotoBottom(ADSHANDLE hTable);
-UNSIGNED32 AdsSkip(ADSHANDLE hTable, SIGNED32 lRows);
-UNSIGNED32 AdsAtBOF(ADSHANDLE hTable, UNSIGNED16* pbAtBegin);
-UNSIGNED32 AdsAtEOF(ADSHANDLE hTable, UNSIGNED16* pbAtEnd);
-UNSIGNED32 AdsGetRecordNum(ADSHANDLE hTable, UNSIGNED16, UNSIGNED32* pulRec);
-}
-
 namespace {
 
 // RAII wrapper: creates a fresh empty CDX table for navigation tests.

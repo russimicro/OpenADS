@@ -8,13 +8,6 @@
 
 namespace fs = std::filesystem;
 
-extern "C" {
-UNSIGNED32 AdsGetIndexOrderByHandle(ADSHANDLE hIndex, UNSIGNED16* pusOrder);
-UNSIGNED32 AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 usFilterOption,
-                          UNSIGNED32* pulCount);
-UNSIGNED32 AdsCloseAllIndexes(ADSHANDLE hTable);
-}
-
 // Reproduces Harbour rddads' OrdNumber(cTag): it resolves the tag name to
 // an index handle via AdsGetIndexHandle, then asks the ordinal of that
 // handle via AdsGetIndexOrderByHandle (see contrib/rddads/ads1.c,

@@ -6,22 +6,6 @@
 
 namespace fs = std::filesystem;
 
-extern "C" {
-UNSIGNED32 AdsGotoBottom(ADSHANDLE hTable);
-UNSIGNED32 AdsGotoTop(ADSHANDLE hTable);
-UNSIGNED32 AdsSkip(ADSHANDLE hTable, SIGNED32 lRows);
-UNSIGNED32 AdsAtBOF(ADSHANDLE hTable, UNSIGNED16* pbAtBegin);
-UNSIGNED32 AdsAtEOF(ADSHANDLE hTable, UNSIGNED16* pbAtEnd);
-UNSIGNED32 AdsGetRecordNum(ADSHANDLE hTable, UNSIGNED16,
-                           UNSIGNED32* pulRec);
-UNSIGNED32 AdsShowDeleted(UNSIGNED16);
-UNSIGNED32 AdsDeleteRecord(ADSHANDLE hTable);
-UNSIGNED32 AdsRecallRecord(ADSHANDLE hTable);
-UNSIGNED32 AdsGotoRecord(ADSHANDLE hTable, UNSIGNED32);
-UNSIGNED32 AdsGetIndexHandleByOrder(ADSHANDLE hTable, UNSIGNED16,
-                                    ADSHANDLE*);
-}
-
 static void rprint(ADSHANDLE hT, const char* tag) {
     UNSIGNED32 r = 0; UNSIGNED16 b = 0, e = 0;
     AdsGetRecordNum(hT, 0, &r);

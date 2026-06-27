@@ -1,5 +1,6 @@
 #pragma once
 
+#include "sql_backend/backend_tx_manager.h"
 #include "sql_backend/sqlite_table.h"
 #include "sql_backend/uri.h"
 #include "util/result.h"
@@ -41,6 +42,13 @@ public:
     util::Result<void> goto_bottom(SqliteTable* tbl);
     util::Result<void> skip(SqliteTable* tbl, std::int32_t step);
 
+    // Tier-2 push-down: install (where non-empty) or clear (where empty) a SQL
+    // WHERE fragment and reload the rowid list so navigation walks only the
+    // matching rows. `where` must be a trusted, already-translated SQL boolean
+    // expression (see engine::try_emit_sql_where) — it is spliced into the
+    // SELECT verbatim. Resets the cursor to an unpositioned state.
+    util::Result<void> set_filter(SqliteTable* tbl, const std::string& where);
+
     util::Result<bool>          at_eof(SqliteTable* tbl) const;
     util::Result<bool>          at_bof(SqliteTable* tbl) const;
     util::Result<std::uint32_t> record_count(SqliteTable* tbl);
@@ -64,10 +72,19 @@ public:
 
     const std::string& db_path() const noexcept { return db_path_; }
 
+    // Execute a simple SQL statement (no result set). Used by the
+    // transaction manager for BEGIN/COMMIT/ROLLBACK/SAVEPOINT.
+    util::Result<void> exec_sql(const std::string& sql);
+
+    // ── Tier 1: Transaction management (SQLRDD pattern) ─────────────
+    BackendTxManager& tx_manager() noexcept { return tx_mgr_; }
+    const BackendTxManager& tx_manager() const noexcept { return tx_mgr_; }
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     std::string           db_path_;
+    BackendTxManager      tx_mgr_;
 };
 
 } // namespace openads::sql_backend

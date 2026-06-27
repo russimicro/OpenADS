@@ -41,6 +41,7 @@ public:
 
     std::string name()       const override { return tag_name_; }
     std::string expression() const override { return key_expr_; }
+    std::string condition()  const override { return for_expr_; }
     bool        descending() const override { return descend_; }
     bool        unique()     const override { return unique_; }
     std::uint16_t key_length() const override { return key_size_; }
@@ -77,6 +78,14 @@ public:
     // different key length than the prior version of the tag.
     util::Result<void> set_options(bool unique, bool descend,
                                    std::uint16_t new_key_size);
+
+    // Rewrite the stored key expression (and FOR clause) in the on-disk
+    // sub-tag header + the in-memory members. Used when CREATE INDEX
+    // re-creates an existing tag on a DIFFERENT column: clear_data +
+    // set_options rebuild the tree/options but keep the old expression,
+    // which then lies to AdsGetIndexExpr and mis-syncs later appends.
+    util::Result<void> set_expression(const std::string& key_expr,
+                                      const std::string& for_expr);
 
     util::Result<void> insert(std::uint32_t recno,
                               const std::string& key) override;
@@ -115,7 +124,8 @@ public:
                const std::string& key_expr,
                std::uint16_t      key_size,
                bool               unique,
-               bool               descend);
+               bool               descend,
+               const std::string& for_expr = "");
 
     // Append a new sub-tag to an existing compound CDX. Inserts an
     // entry into the structure-tag root leaf, allocates a fresh
@@ -128,7 +138,8 @@ public:
                 const std::string& key_expr,
                 std::uint16_t      key_size,
                 bool               unique,
-                bool               descend);
+                bool               descend,
+                const std::string& for_expr = "");
 
     // Open a specific sub-tag by name. Empty name selects the first
     // entry in the structure-tag leaf (legacy `open` semantics).
@@ -204,6 +215,7 @@ private:
     bool                                    descend_   = false;
     KeyEncoding                             key_enc_   = KeyEncoding::Text;
     std::string                             key_expr_;
+    std::string                             for_expr_;
     std::string                             tag_name_;
     std::uint64_t                           file_size_ = 0;
 

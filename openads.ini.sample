@@ -1,0 +1,32 @@
+# openads.ini — settings for the OpenADS server daemon.
+#
+# Point the daemon at this file with:  openads_serverd --config openads.ini
+# Any command-line flag given as well overrides the matching key here, so you
+# can keep a baseline in the file and tweak one setting on the fly.
+#
+# `openads_serverd --setup` writes a file like this for you and (optionally)
+# registers it as a service. Lines are `key = value`; `#`/`;` start comments;
+# an optional `[server]` header is accepted and ignored.
+
+[server]
+
+# Bind address. 0.0.0.0 = all interfaces; 127.0.0.1 = local only.
+host = 0.0.0.0
+
+# TCP wire port clients connect to. 6262 is the historical ADS default.
+# (If SAP's Advantage service is still running on this host, pick another,
+#  e.g. 6263, to avoid a bind clash.)
+port = 6262
+
+# listen() backlog.
+backlog = 16
+
+# Directory the engine serves tables from.
+data = .
+
+# Studio web console: set a port to expose the browser admin UI / REST API.
+# Leave commented out to disable it.
+# http_port = 6263
+
+# Studio logins (repeatable). Omit entirely to leave the console open.
+# http_user = admin:change-me

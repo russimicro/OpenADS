@@ -177,11 +177,47 @@ util::Result<std::size_t> sock_recv(Socket& sock,
     return static_cast<std::size_t>(got);
 }
 
+util::Result<void> socket_set_nonblocking(Socket& sock, bool enable) {
+    u_long mode = enable ? 1u : 0u;
+    if (::ioctlsocket(static_cast<SOCKET>(sock.handle), FIONBIO, &mode) != 0) {
+        return util::Error{5000, WSAGetLastError(),
+                           "ioctlsocket(FIONBIO) failed", ""};
+    }
+    return {};
+}
+
+bool socket_recv_would_block(const util::Error& e) noexcept {
+    return e.sub_code == WSAEWOULDBLOCK;
+}
+
 void sock_close(Socket& sock) noexcept {
     if (sock.valid()) {
         closesocket(static_cast<SOCKET>(sock.handle));
         sock.handle = static_cast<std::uintptr_t>(-1);
     }
+}
+
+util::Result<int> socket_poll(std::vector<PollItem>& items, int timeout_ms) {
+    if (items.empty()) return 0;
+    std::vector<WSAPOLLFD> fds(items.size());
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        fds[i].fd      = static_cast<SOCKET>(items[i].sock.handle);
+        fds[i].events  = POLLRDNORM;
+        fds[i].revents = 0;
+    }
+    int rc = WSAPoll(fds.data(), static_cast<ULONG>(fds.size()), timeout_ms);
+    if (rc == SOCKET_ERROR) {
+        return util::Error{5000, WSAGetLastError(), "WSAPoll failed", ""};
+    }
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        std::uint8_t ev = 0;
+        if (fds[i].revents & (POLLRDNORM | POLLIN))
+            ev |= static_cast<std::uint8_t>(PollEvent::Readable);
+        if (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL))
+            ev |= static_cast<std::uint8_t>(PollEvent::Error);
+        items[i].events = ev;
+    }
+    return rc;
 }
 
 } // namespace openads::network

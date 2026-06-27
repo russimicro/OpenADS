@@ -8,11 +8,6 @@
 
 namespace fs = std::filesystem;
 
-extern "C" {
-UNSIGNED32 AdsGetIndexHandleByOrder(ADSHANDLE hTable, UNSIGNED16 usOrder,
-                                    ADSHANDLE* phIndex);
-}
-
 // M(rddads-compat) — verify CREATE INDEX A then CREATE INDEX B
 // makes B the active order, A still reachable via ordinal 1.
 TEST_CASE("AdsGetIndexHandleByOrder returns indexes in creation order") {

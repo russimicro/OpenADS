@@ -554,11 +554,117 @@ HB_FUNC( HBO_SEEKNUM )       /* ( nIdx, nVal ) -> .T. if found (soft seek, doubl
    hb_retl( ulRc == 0 && bFound != 0 );
 }
 
+HB_FUNC( HBO_SETSCOPENUM )   /* ( nIdx, nScope, nVal ) -> .T./.F. (rc==0) */
+{
+   /* ADS_TOP=0, ADS_BOTTOM=1; ADS_DOUBLEKEY=2 */
+   double dv = hb_parnd( 3 );
+   UNSIGNED32 ulRc = AdsSetScope( ( ADSHANDLE ) hb_parnint( 1 ),
+                                  ( UNSIGNED16 ) hb_parni( 2 ),
+                                  ( UNSIGNED8 * ) &dv,
+                                  ( UNSIGNED16 ) sizeof( double ),
+                                  ADS_DOUBLEKEY );
+   hb_retl( ulRc == 0 );
+}
+
+HB_FUNC( HBO_SETSCOPESTR )   /* ( nIdx, nScope, cVal ) -> .T./.F. (rc==0) */
+{
+   /* ADS_STRINGKEY=1 */
+   const char * sz = hb_parc( 3 );
+   UNSIGNED32   ulRc = 1;
+   if( sz )
+      ulRc = AdsSetScope( ( ADSHANDLE ) hb_parnint( 1 ),
+                          ( UNSIGNED16 ) hb_parni( 2 ),
+                          ( UNSIGNED8 * ) sz,
+                          ( UNSIGNED16 ) hb_parclen( 3 ),
+                          ADS_STRINGKEY );
+   hb_retl( ulRc == 0 );
+}
+
+HB_FUNC( HBO_CLEARSCOPE )    /* ( nIdx, nScope ) -> .T./.F. (rc==0) */
+{
+   hb_retl( AdsClearScope( ( ADSHANDLE ) hb_parnint( 1 ),
+                           ( UNSIGNED16 ) hb_parni( 2 ) ) == 0 );
+}
+
 HB_FUNC( HBO_ISFOUND )       /* ( nTbl ) -> .T./.F. */
 {
    UNSIGNED16 bFound = 0;
    AdsIsFound( ( ADSHANDLE ) hb_parnint( 1 ), &bFound );
    hb_retl( bFound != 0 );
+}
+
+/* ---- Data Dictionary (Frente 2: o hibrido) --------------------------------
+ * Le metadados ricos por campo do dicionario vivo (REQUIRED/DEFAULT). O handle
+ * e o da CONEXAO (oConn:Handle()), nao o de uma tabela. Sem dicionario ou sem
+ * a propriedade -> string vazia (fallback gracioso na camada Harbour). */
+HB_FUNC( HBO_DDGETFIELDPROP )  /* ( nConn, cTable, cField, nProp ) -> cValor ("" se nenhum) */
+{
+   char       szBuf[ 512 ];
+   UNSIGNED16 usLen = ( UNSIGNED16 ) sizeof( szBuf );
+   memset( szBuf, 0, sizeof( szBuf ) );
+   if( AdsDDGetFieldProperty( ( ADSHANDLE ) hb_parnint( 1 ),
+          ( UNSIGNED8 * ) hb_parc( 2 ), ( UNSIGNED8 * ) hb_parc( 3 ),
+          ( UNSIGNED16 ) hb_parni( 4 ), szBuf, &usLen ) == 0 )
+   {
+      if( usLen > ( UNSIGNED16 ) ( sizeof( szBuf ) - 1 ) )
+         usLen = ( UNSIGNED16 ) ( sizeof( szBuf ) - 1 );
+      szBuf[ usLen ] = '\0';
+      hb_retc( szBuf );
+   }
+   else
+      hb_retc( "" );
+}
+
+/* --- helpers de FIXTURE de dicionario (usados pelo gate p/ montar um .add) --- */
+HB_FUNC( HBO_DDCREATE )        /* ( cDictPath ) -> nConn (0 em falha) */
+{
+   ADSHANDLE  hConn = 0;
+   UNSIGNED32 ulRc  = AdsDDCreate( ( UNSIGNED8 * ) hb_parc( 1 ), 0, NULL, &hConn );
+   hb_retnint( ulRc == 0 ? ( HB_MAXINT ) hConn : 0 );
+}
+
+HB_FUNC( HBO_DDADDTABLE )      /* ( nConn, cAlias, cTablePath ) -> .T./.F. */
+{
+   hb_retl( AdsDDAddTable( ( ADSHANDLE ) hb_parnint( 1 ),
+      ( UNSIGNED8 * ) hb_parc( 2 ), ( UNSIGNED8 * ) hb_parc( 3 ),
+      0, 0, NULL, NULL ) == 0 );
+}
+
+HB_FUNC( HBO_DDSETFIELDPROP )  /* ( nConn, cTable, cField, nProp, cValor ) -> .T./.F. */
+{
+   hb_retl( AdsDDSetFieldProperty( ( ADSHANDLE ) hb_parnint( 1 ),
+      ( UNSIGNED8 * ) hb_parc( 2 ), ( UNSIGNED8 * ) hb_parc( 3 ),
+      ( UNSIGNED16 ) hb_parni( 4 ),
+      ( void * ) hb_parc( 5 ), ( UNSIGNED16 ) hb_parclen( 5 ) ) == 0 );
+}
+
+/* ---- AOF (Rushmore Optimized Filter) server-side pushdown (Task 1) -------- *
+ * AdsSetAOF instala um filtro avaliado no servidor (AOF); AdsClearAOF remove.
+ * AdsGetAOFOptLevel devolve o nivel de otimizacao Rushmore (0 = sem indice
+ * cobrindo o filtro, ADS_OPTIMIZED_NONE; apenas diagnostico, nunca asserir
+ * != 0, pois tabela sem indice SALDO retorna 0 mesmo com filtro ativo).     */
+
+HB_FUNC( HBO_SETAOF )       /* ( nTbl, cCond ) -> .T./.F. (rc==0) */
+{
+   const char * szCond = hb_parc( 2 );
+   UNSIGNED32   ulRc   = 1;
+   if( szCond )
+      ulRc = AdsSetAOF( ( ADSHANDLE ) hb_parnint( 1 ),
+                        ( UNSIGNED8 * ) szCond, ADS_RESOLVE_IMMEDIATE );
+   hb_retl( ulRc == 0 );
+}
+
+HB_FUNC( HBO_CLEARAOF )     /* ( nTbl ) -> .T./.F. (rc==0) */
+{
+   hb_retl( AdsClearAOF( ( ADSHANDLE ) hb_parnint( 1 ) ) == 0 );
+}
+
+HB_FUNC( HBO_AOFOPTLEVEL )  /* ( nTbl ) -> nLevel (0 == ADS_OPTIMIZED_NONE); diagnostico */
+{
+   UNSIGNED16 usLevel = 0;
+   /* assinatura ACE real = 4 args: (hTable, *pusLevel, *pucBuf, *pusLen) */
+   AdsGetAOFOptLevel( ( ADSHANDLE ) hb_parnint( 1 ), &usLevel, NULL, NULL );
+   hb_retni( ( int ) usLevel );
 }
 
 #pragma ENDDUMP

@@ -5,8 +5,10 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -125,6 +127,23 @@ util::Result<std::size_t> sock_recv(Socket& sock,
     return static_cast<std::size_t>(got);
 }
 
+util::Result<void> socket_set_nonblocking(Socket& sock, bool enable) {
+    int fd = static_cast<int>(sock.handle);
+    int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return util::Error{5000, errno, "fcntl(F_GETFL) failed", ""};
+    }
+    flags = enable ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+    if (::fcntl(fd, F_SETFL, flags) < 0) {
+        return util::Error{5000, errno, "fcntl(F_SETFL) failed", ""};
+    }
+    return {};
+}
+
+bool socket_recv_would_block(const util::Error& e) noexcept {
+    return e.sub_code == EWOULDBLOCK || e.sub_code == EAGAIN;
+}
+
 void sock_close(Socket& sock) noexcept {
     if (sock.valid()) {
         // Force-shutdown first so any thread blocked in accept() /
@@ -134,6 +153,30 @@ void sock_close(Socket& sock) noexcept {
         ::close(static_cast<int>(sock.handle));
         sock.handle = static_cast<std::uintptr_t>(-1);
     }
+}
+
+util::Result<int> socket_poll(std::vector<PollItem>& items, int timeout_ms) {
+    if (items.empty()) return 0;
+    std::vector<pollfd> fds(items.size());
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        fds[i].fd      = static_cast<int>(items[i].sock.handle);
+        fds[i].events  = POLLIN;
+        fds[i].revents = 0;
+    }
+    int rc = ::poll(fds.data(), static_cast<nfds_t>(fds.size()), timeout_ms);
+    if (rc < 0) {
+        if (errno == EINTR) return 0;   // interrupted; caller re-polls
+        return util::Error{5000, errno, "poll failed", ""};
+    }
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        std::uint8_t ev = 0;
+        if (fds[i].revents & POLLIN)
+            ev |= static_cast<std::uint8_t>(PollEvent::Readable);
+        if (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL))
+            ev |= static_cast<std::uint8_t>(PollEvent::Error);
+        items[i].events = ev;
+    }
+    return rc;
 }
 
 } // namespace openads::network

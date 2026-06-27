@@ -1,5 +1,5 @@
 // M4 ADT driver smoke test.
-// Opens f:\pmsys\data\landlords.adt (skipped when absent) and verifies:
+// Opens tests/fixtures/adi/landlords.adt (skipped when absent) and verifies:
 //   * field count and names
 //   * record count
 //   * deletion flag normalisation (0x04 → active)
@@ -15,7 +15,7 @@
 
 namespace fs = std::filesystem;
 
-static const fs::path kAdtDir  { "f:\\pmsys\\data" };
+static const fs::path kAdtDir  { "tests/fixtures/adi" };
 static const fs::path kAdtPath { kAdtDir / "landlords.adt" };
 
 TEST_CASE("M4 ADT: open landlords.adt, read fields and records") {

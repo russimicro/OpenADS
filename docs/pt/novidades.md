@@ -1,4 +1,4 @@
----
+﻿---
 title: Novidades
 layout: default
 parent: Início (PT)
@@ -6,7 +6,7 @@ nav_order: 0
 permalink: /pt/novidades/
 ---
 
-# Novidades (v1.0.0-rc29 → v1.2.2)
+# Novidades (v1.0.0-rc29 → v1.5.0)
 
 Esta página resume as mudanças mais notáveis desde a versão
 v1.0.0-rc29. Para o histórico completo de commits, consulte o
@@ -19,10 +19,10 @@ v1.0.0-rc29. Para o histórico completo de commits, consulte o
 ### Driver de Tabelas com SQLite
 
 Um driver alternativo de tabelas suportado por SQLite está
-disponível atrás da flag do CMake `OPENADS_WITH_SQLITE`. Quando
+disponível por trás da flag de CMake `OPENADS_WITH_SQLITE`. Quando
 habilitado, o motor pode abrir e manipular tabelas através de um
-backend SQLite, fornecendo uma camada de armazenamento
-alternativa. Novos arquivos fonte:
+backend SQLite, fornecendo uma camada de armazenamento alternativa.
+Novos arquivos fonte:
 
 - `src/sql_backend/sqlite_backend.cpp`
 - `src/sql_backend/sqlite_connection.cpp`
@@ -31,24 +31,25 @@ alternativa. Novos arquivos fonte:
 
 ### Backends SQL — PostgreSQL / MariaDB / ODBC (OpenADS Plus)
 
-O OpenADS agora pode abrir tabelas em **PostgreSQL**, **MariaDB /
-MySQL** e qualquer motor acessível por **ODBC** atrás da ABI ACE,
-escolhido pela URI de conexão (`postgresql://` / `mariadb://` /
-`odbc://`), igual ao backend SQLite. Do ponto de vista da
-aplicação a tabela se comporta como qualquer área de trabalho —
-navegação, leitura de campos e SEEK por coluna funcionam.
+OpenADS agora pode abrir tabelas em **PostgreSQL**, **MariaDB /
+MySQL** e qualquer motor acessível por **ODBC** por trás da ABI
+ACE, selecionado pela URI de conexão (`postgresql://` /
+`mariadb://` / `odbc://`), exatamente como o backend SQLite. Do
+ponto de vista da aplicação, a tabela se comporta como qualquer
+outra área de trabalho — navegação, leitura de campos e SEEK por
+coluna funcionam.
 
-Esses quatro backends SQL ficam atrás de um único **registro
+Esses quatro backends SQL ficam por trás de um único **registro
 plugável de backend-ops**: cada um registra uma struct
-`BackendTableOps` (17 ponteiros de função espelhando as ops de
-tabela), então as ~17 funções ABI de navegação / campos ficam
-agnósticas ao backend em vez de multiplicar um bloco `if` por
-backend. Adicionar outro backend (p. ex. Firebird, ou MSSQL /
+`BackendTableOps` (17 ponteiros de função que espelham as ops de
+tabela), de modo que as ~17 funções ABI de navegação / campos
+ficam agnósticas ao backend em vez de multiplicar um bloco `if`
+por backend. Adicionar outro backend (ex: Firebird, ou MSSQL /
 Oracle via ODBC) é uma struct de ops mais uma linha de registro.
-As rotas DBF / ADT local nativas e a remota `tcp://` ficam
-inalteradas. Os identificadores são validados para ASCII seguro e
-os valores de SEEK usam parâmetros preparados (sem concatenar
-strings). Veja `docs/OPENADS_PLUS.md`.
+Os caminhos DBF / ADT local nativo e o remoto `tcp://` ficam
+inalterados. Os identificadores são validados para ASCII seguro e
+os valores de SEEK usam parâmetros preparados (sem concatenação
+de strings). Ver `docs/OPENADS_PLUS.md`.
 
 ### Patches de Validação ADT (F1–F7, R1–R3)
 
@@ -63,24 +64,24 @@ OpenADS agora pode operar de ponta a ponta com arquivos nativos
 `.adt` / `.adi` / `.adm`:
 
 - **Criar** — `AdsCreateTable(ADS_ADT)` escreve um cabeçalho de
-  tabela válido, descritores de campo e um armazenamento de memo
+  tabela válido, descritores de campo e um armazenamento memo
   `.adm` opcional.
 - **Escrever** — `AdsAppendRecord` / `AdsWriteRecord` persistem
   linhas e payloads de memo.
-- **Ler** — Reabrir, obter campos, contagem de registros,
-  ida e volta de memo.
-- **Índice** — `AdsCreateIndex61` constrói sacolas `.adi`
+- **Ler** — Reabrir, obter campos, contagem de registros, ida e
+  volta de memo.
+- **Índice** — `AdsCreateIndex61` constrói bolsas `.adi`
   (primeiro tag via `AdiIndex::create`, tags adicionais via
   `add_tag`).
 - **Buscar** — `AdsSeek` em chaves ADI de caractere e numéricas.
-- **AUTOINC** — contador semeado a partir de linhas existentes ao
-  abrir; bytes 139–143 do descritor permanecem em zero no disco.
+- **AUTOINC** — contador semeadado a partir de linhas existentes
+  ao abrir; bytes 139–143 do descritor permanecem zero em disco.
 - **Layout de memo ADM** — blocos de 8 bytes com um prefixo de
   metadados de 1024 bytes.
 
 ### Caminho de Escrita ADI
 
-O driver de índices ADI agora suporta operações de escrita —
+O driver de índices ADI agora suporta operações de escritura —
 `insert`, `erase` e `flush` — incluindo a decodificação de recno
 de folha densa e busca de chaves de caractere. Isso completa o
 ciclo de leitura-escrita para índices ADI.
@@ -90,36 +91,36 @@ ciclo de leitura-escrita para índices ADI.
 Os triggers agora são executados com o despacho de temporização
 adequado:
 
-- **BEFORE** — executa antes da instrução DML.
+- **BEFORE** — executado antes da instrução DML.
 - **INSTEAD_OF** — substitui a DML em views.
-- **AFTER** — executa após a execução bem-sucedida.
+- **AFTER** — executado após a execução bem-sucedida.
 
-São suportados ordenação por prioridade, tabela `__error` para
-falhas, procedimentos armazenados `sp_DisableTriggers` /
+Suportam ordenação por prioridade, tabela `__error` para falhas,
+procedimentos armazenados `sp_DisableTriggers` /
 `sp_EnableTriggers` e chaves compostas de triggers em
 `system.triggers`.
 
 ### Interface de Gestão DA-Web
 
 O substituto do Data Architect baseado em navegador (**DA-Web**)
-recebeu um trabalho extenso:
+recebeu trabalho extenso:
 
-- **Edição de células em linha** com rastreamento de alterações
-  e feedback visual.
+- **Edição em linha de células** com rastreamento de alterações
+  visuais.
 - **Gestão de índices** — salvar e excluir índices via API.
-- **CRUD de Triggers** — adicionar, excluir e editar triggers
-  com validação em linha.
-- **Barra de filtros AOF (Rushmore)** no navegador de tabelas.
+- **CRUD de Triggers** — adicionar, excluir e editar triggers com
+  validação em linha.
+- **Barra de filtros AOF (Rushmore)** no explorador de tabelas.
 - **Destaque de sintaxe SQL ADS** com cores semelhantes ao
   HeidiSQL.
 - **Visualizador de código de procedimentos armazenados /
-  funções** com grade de parâmetros e Save-to-DD.
-- **Navegador de tags de índice**, etiquetas de tipos de campo e
+  funções** com parâmetros e Save-to-DD.
+- **Explorador de tags de índice**, etiquetas de tipos de campo e
   scripts SQL.
 - **Menu de conexão** — Novo DD, Abrir DD, Tabelas livres.
-- **Abas de Permissões Efetivas** e **Membros** nos painéis de
+- **Abas de Permissões Efetivas** e **Membros** em painéis de
   usuário/grupo.
-- **Dropdowns de tags RI** populados a partir de arquivos `.add`
+- **Dropdowns de tags RI** preenchidos a partir de arquivos `.add`
   binários.
 
 ### openmonitor — TUI e Painel Web
@@ -131,30 +132,32 @@ terminal (TUI) quanto um painel web para monitorar e administrar
 ### OpenADS Studio — Responsive (telefone / tablet)
 
 O console web Studio agora se adapta a telas pequenas — pode ser
-usado de um telefone ou tablet, não apenas de um navegador
-desktop. Abaixo de ~768 px a lista de tabelas vira um **drawer**
-deslizante (☰ no header, fundo escurecido, fechamento automático
-ao escolher); a barra de abas rola horizontalmente e os
-formulários / modais se reorganizam em uma coluna com alvos de
-toque maiores. Também corrige um bug antigo do tema escuro — as
+usado a partir de um telefone ou tablet, não apenas de um
+navegador de desktop. Abaixo de ~768 px a lista de tabelas se
+torna um **drawer** deslizante (☰ no header, fundo atenuado,
+fechamento automático ao selecionar); a barra de abas faz scroll
+horizontal e formulários / modais se reorganizam em uma coluna
+ com alvos táteis maiores. Um bug antigo do tema escuro — as
 variáveis CSS `--panel` / `--panel-2` / `--border` eram
-auto-referenciais, então painéis e bordas ficavam transparentes.
+autorreferenciais, então painéis e bordas eram renderizados
+transparentes — é corrigido como parte deste trabalho.
 
-### Desempenho de varredura remota (prefetch sequencial)
+### Desempenho de Varredura Remota (prefetch sequencial)
 
-Uma varredura para a frente sobre o wire `tcp://` custava cerca de
-um round-trip TCP por registro (`Skip` + `AtEOF` + `IsFound`). Um
-caminho de prefetch sequencial (negociado por um flag de capacidade
-no Connect) agora anexa um bloco de lookahead aos acks de `Skip`
-para a frente; o cliente os serve localmente e dobra a contagem
-consumida no próximo passo do wire, de modo que o cursor do servidor
-nunca dessincroniza. `AdsAtEOF` / `AdsAtBOF` são respondidos a
-partir da linha atual em cache e `AdsIsFound` de um flag `Found()`
-em cache. Resultado: uma varredura de 50k registros em loopback é
-**~3,9× mais rápida** (só NAV) / **~3,3×** (leitura de 3 campos),
-com os round-trips de `IsFound` zerados. A mudança é aditiva e
-retrocompatível — clientes antigos (sem capacidade anunciada)
-mantêm o comportamento do wire idêntico.
+Uma varredura para a frente sobre a wire `tcp://` custava mais ou
+menos um round-trip TCP por registro (`Skip` + `AtEOF` +
+`IsFound`). Um caminho de prefetch sequencial (negociado via flag
+de capacidade Connect) agora acopla um bloco de lookahead aos acks
+de `Skip` para a frente; o cliente os serve localmente e dobra a
+contagem consumida no próximo passo da wire, de modo que o cursor
+do servidor nunca dessincroniza. `AdsAtEOF` / `AdsAtBOF` são
+respondidos a partir da linha atual cacheada e `AdsIsFound` a
+partir de uma flag `Found()` cacheada. Resultado: uma varredura
+de 50k registros em loopback é **~3.9× mais rápida** (só NAV) /
+**~3.3×** (leitura de 3 campos), com round-trips de `IsFound`
+indo a zero. A mudança é aditiva e retrocompatível — clientes
+antigos (sem capacidade anunciada) mantêm o comportamento da
+wire idêntico.
 
 ### Extensão Nativa PHP (`php_openads`)
 
@@ -166,12 +169,13 @@ date/timestamp e cache de nomes de campo por instrução.
 ### Melhorias na Importação de Dicionário de Dados SAP
 
 - `import_dd` agora copia arquivos de memo `.am` e decodifica
-  corpos de funções encriptados.
+  corpos de funções criptografados.
 - Importação de membresia de grupos (DB:Admin, DB:Backup,
   DB:Debug) a partir de arquivos `.add` binários.
-- Temporização de triggers capturada de `system.triggers`.
-- `grant_permission` e código de erro `AE_SAP_PERMS_NEED_IMPORT`
-  para migração de permissões.
+- Temporização de triggers capturada a partir de
+  `system.triggers`.
+- `grant_permission` e código de erro
+  `AE_SAP_PERMS_NEED_IMPORT` para migração de permissões.
 
 ### Recuperação de Falhas WAL
 
@@ -189,63 +193,151 @@ ARIES-lite.
 - Controle de acesso por tabela com níveis de permissão de
   usuário/grupo.
 
+### Agregação Server-Side (Tier-3)
+
+`AdsAggregate` agora suporta `COUNT`, `SUM`, `AVG`, `MIN` e
+`MAX` com push-down para backends SQL (SQLite, PostgreSQL,
+MariaDB, ODBC). A spec de agregação é validada antes da execução,
+e os resultados são servidos através de um result set baseado em
+handles (`AdsAggregateCount` / `AdsAggregateValue` /
+`AdsAggregateClose`).
+
+### FetchWhere V2
+
+`AdsFetchWhere` agora serve varreduras para a frente a partir de
+um result set cacheado — sem round-trip por correspondência. O
+cliente recebe linhas em lote e as percorre localmente, com recno
+por linha opcional (flag `WANT_RECNO`). As varreduras massivas de
+`SET FILTER` sem AOF são roteadas através de `AdsFetchWhere` com
+ganhos significativos de desempenho.
+
+### Driver ODBC (slice 1–3)
+
+Um driver ODBC completo (`openads_odbc.dll`) está agora
+disponível:
+
+- **Round-trip SELECT** com cursores scrolláveis
+  (`SQLFetchScroll`).
+- **Acesso tipado a colunas** — `SQLDescribeCol` /
+  `SQLColAttribute` / `SQLGetData` despacham através do vtable de
+  ops do backend.
+- **Binding posicional de parâmetros** via `SQLBindParameter`.
+- **Funções de catálogo** — `SQLPrimaryKeys` /
+  `system.primarykeys`.
+- **Emulação de app-lock** — `rLock()`/`fLock()` via SQL Server
+  `sp_getapplock`, locks advisory do PostgreSQL, locks nomeados do
+  MariaDB e tabela `OPENADS$LOCKS` do Firebird.
+
+### Caminho de Escrita Nativo (PostgreSQL / MariaDB / Firebird)
+
+`AdsAppendRecord` / `AdsSetField` / `AdsWriteRecord` /
+`AdsDeleteRecord` agora funcionam de ponta a ponta em backends
+PostgreSQL, MariaDB e Firebird — sem passsthrough ODBC.
+
+### Expansão do Push-Down SQL
+
+As expressões de `SET FILTER` e AOF agora são empurradas para
+SQLite e PostgreSQL como cláusulas `WHERE` quando a árvore de
+expressões está dentro do subconjunto otimizável
+(`try_emit_sql_where`). A cobertura inclui `$` (contém),
+`LEFT()`, `RIGHT()`, `SUBSTR()` e `UPPER()`.
+
+### Documentação Completa da API (Português)
+
+Todas as **364 funções ACE** estão agora documentadas em português
+(pt-BR) em `docs/pt/funcoes/`, cobrindo sintaxe, parâmetros,
+valores de retorno e exemplos.
+
+### Correção de Calling Convention x86 (32-bit)
+
+`ENTRYPOINT` agora é `__stdcall` (WINAPI) no Win32, coincidindo
+com a convenção de chamada do `rddads` do Harbour. Isso corrige a
+corrupção de stack quando apps Harbour de 32-bit chamam funções ACE
+através da DLL. O arquivo `.def` do x86 e a biblioteca de
+importação são atualizados para coincidir. (Reportado por Jonsson /
+RusSoft Ltda.)
+
+### CI — Build Leg msvc-x86
+
+Uma nova entrada de matrix `msvc-x86` no
+`.github/workflows/ci.yml` garante que builds de 32-bit sejam
+testados em cada PR, capturando breakages exclusivos do x86
+(redução dependente de bitness, conflitos de assinatura `SQLLEN*`,
+avisos `/WX`) antes de chegarem ao main.
+
 ---
 
 ## Correções de Erros
 
 ### Motor
 
-- **Caminho de folhas vazias CDX** — os caminhos para frente e
-  para trás no índice agora saltam folhas vazias deixadas por
+- **Ordem de tags CDX** — `list_tags()` agora ordena por offset
+  do tag-header (ordem de criação) em vez da ordem alfabética da
+  folha. Corrige `DBSETORDER(n)` selecionando a tag errada em
+  bolsas CDX escritas pelo SAP ADS. (Reportado por Jonsson /
+  RusSoft Ltda.)
+- **Tamanho de chave de índice de expressão CDX** — chaves de
+  expressões compostas (ex: `UPPER(cName)`) agora são dimensionadas
+  a partir do comprimento fixo natural da expressão, não do
+  conteúdo do primeiro registro. O rtrim antigo truncava chaves,
+  causando linhas fora de ordem após reindex em tabelas grandes.
+  (Reportado por Jonsson / RusSoft Ltda.)
+- **Caminho de folhas vazias CDX** — varreduras para a frente e
+  para trás do índice agora ignoram folhas vazias deixadas por
   `erase()`. Corrige `ADSCDX/5000` em REINDEX / exclusão em massa.
   (PR #63)
-- **Bits de recno na folha CDX** — `compute_layout` dimensiona o
-  campo de número de registro a partir de `max_rec`, não apenas do
-  comprimento da chave, para que tags com chaves largas (≥40 bytes)
-  não truncem mais recnos ≥ 4096. (PR #62)
-- **Busca parcial CDX** — `seek_key` compara apenas o comprimento
-  da chave de busca, para que buscas parciais como
+- **Bits de recno em folha CDX** — `compute_layout` dimensiona o
+  campo de número de registro a partir de `max_rec`, não apenas o
+  comprimento da chave, para que tags com chaves largas não
+  tragam mais recnos ≥ 4096. (PR #62)
+- **Busca parcial CDX** — `seek_key` compara apenas o
+  comprimento da chave de busca, para que buscas parciais como
   `SEEK "ART-00024800"` correspondam a chaves armazenadas
   `"ART-00024800 desc ..."`. (PR #62)
+- **FOR condicional em campos lógicos** — o avaliador de
+  expressões de índice agora trata campos lógicos como numéricos
+  (0/1) em vez de strings truthy, para que `FOR ACTIVE` filtre
+  corretamente registros `.F.`. (PR #121)
+- **Corrupção por INDEX ON** — impede que `INDEX ON` corrompa
+  índices da tabela fonte. (PR #118)
 - **SKIP para trás MSSQL** — erro por um: `abs_n == pos` agora
   alcança a linha 0 em vez de reportar BOF. (PR #65)
 - **Getters tipados ABI para backends SQL** — `AdsGetDouble`/`Long`/
   `LongLong`/`String` despacham através do vtable de ops do
   backend, para que o PostgreSQL retorne valores reais. (PR #66)
 - **`AdsGetIndexHandle` para backends SQL** — resolve por nome
-  para tabelas PG para que a busca por índice funcione
-  ponta a ponta. (PR #66)
+  para tabelas PG para que a busca por índice funcione de ponta a
+  ponta. (PR #66)
 - **Formato de chave numérica NTX** — campos numéricos indexados
-  em um bolso NTX agora armazenam chaves no formato nativo DBFNTX
-  (magnitudo preenchida com zeros + negativos complementados) em
-  vez de texto `STR()` preenchido com espaços. A busca nativa
-  `dbSeek(<number>)` de um lector xBase agora corresponde à chave
-  em disco. Bolsos de índice reabertos retêm a codificação
-  numérica. (PR #67)
+  em uma bolsa NTX agora armazenam chaves no formato nativo
+  DBFNTX (magnitude preenchida com zeros + negativos
+  complementados) em vez de texto `STR()` preenchido com espaços.
+  A busca nativa `dbSeek(<number>)` de um lector xBase agora
+  corresponde à chave em disco. Bolsas de índice reabertas
+  conservam a codificação numérica. (PR #67)
 - **`dbSeek` numérico** — rddads envia tipo de chave
-  `ADS_STRING` para buscas numéricas; o motor agora lida com
-  isso corretamente.
+  `ADS_STRING` para buscas numéricas; o motor agora lida com isso
+  corretamente.
 - **`ALIAS->FIELD` em busca numérica** — remove o prefixo
   `ALIAS->` para que tags CDX com alias encontrem chaves.
 - **Reversão de transações** — remove fisicamente os registros
   adicionados ao reverter em vez de deixar linhas fantasma.
 - **Vazamento de estado LockMgr** — `held_` agora é limpo ao
-  desbloquear para que o próximo bloqueio tome um bloqueio real
-  do SO.
+  destravar para que o próximo bloqueio tome um bloqueio real do SO.
 - **`AdsGetRecordCount`** — agora respeita `bFilterOption`.
 - **`AdsSetRelation`** — falha honestamente quando apropriado.
 - **`seek_key`** — `walk_to_last` agora honra `SET DELETED ON`.
 - **Navegação de tabela vazia** — lida corretamente com tabelas
   com zero registros.
-- **Navegação de registros excluídos** — estado correto após
-  pular linhas excluídas.
-- **Contagem de bloqueios LockMgr** — bloqueios repetidos na
-  mesma chave agora são contados por referência; o bloqueio do
-  SO é liberado apenas quando o último detentor desbloqueia.
-- **Verificação de limites de registros WAL** —
-  `TxLog::read_all` valida o comprimento de cada campo
-  UPDATE/APPEND antes de ler, evitando leituras excessivas em
-  arquivos WAL truncados ou corrompidos.
+- **Navegação de registros eliminados** — estado correto após
+  pular linhas eliminadas.
+- **Contagem de bloqueios LockMgr** — bloqueios repetidos sobre a
+  mesma chave agora são contados por referência; o bloqueio do SO
+  é liberado apenas quando o último detentor destrava.
+- **Verificação de limites de registros WAL** — `TxLog::read_all`
+  valida o comprimento de cada campo UPDATE/APPEND antes de ler,
+  evitando leituras excessivas em arquivos WAL truncados ou
+  corrompidos.
 
 ### ABI
 
@@ -257,10 +349,29 @@ ARIES-lite.
 - **Resolução de nomes de campo insensível a maiúsculas** —
   `field_index` agora é cacheado para melhor desempenho.
 - **`AE_NO_CURRENT_RECORD`** — retorna 5068 em vez de 5026.
-- **`OrdListAdd`** — volta ao nome base quando um caminho
-  relativo prefixa duas vezes o diretório da tabela.
+- **`OrdListAdd`** — volta ao nome base quando um caminho relativo
+  prefixa dobrado o diretório da tabela.
 - **Vínculo de helpers trig** — vínculo C++ para helpers `trig_*`
   para silenciar MSVC C4190.
+- **Crash de `AdsGetField` em backends SQL** — ler por ordinal de
+  campo não causa mais crash.
+- **AdsGetRecordCount em ORDER condicional** — conta
+  correspondências FOR corretamente. (PR #100)
+- **`AdsSetAOF` para filtros não otimizáveis** — agora retorna
+  `AE_INVALID_EXPRESSION` em vez de sucesso, para que o rddads
+  stock caia em filtrado do lado do cliente. O comportamento
+  anterior desabilitava silenciosamente `SET FILTER` por completo.
+  (Reportado por Jonsson / RusSoft Ltda.)
+
+### Driver ODBC
+
+- **Build x86** — `C4100` (parâmetro não utilizado) e `C2733`
+  (conflito de assinatura `SQLLEN*` vs `SQLPOINTER`) corrigidos
+  para 32-bit MSVC `/WX`. (PR #119)
+- **Conformidade DM/ADO** — descritores de handle, `SQLBindCol` e
+  mapeamento de tipo `BIT` corrigidos.
+- **`SQL_DRIVER_ODBC_VER` / `SQL_ODBC_VER`** — agora reportados
+  em `SQLGetInfo`.
 
 ### Segurança DA-Web
 
@@ -276,17 +387,16 @@ ARIES-lite.
   corrigidos.
 - **GCC** — avisos `-Werror` resolvidos (shadow, implicit
   conversion, format-truncation, stringop-truncation).
-- **MSVC** — decoração `__stdcall` de x86 e crash de `_wfsopen`
-  em x64 corrigidos.
-- **Clang** — guarda `-Wc2y-extensions` para Apple Clang mais
-  antigo.
-- **Colisão de fd 0 no POSIX** — os manipuladores de arquivo
-  agora são armazenados como `(fd + 1)` para que um fd 0 real
-  (retornado por `open()` quando stdin está fechado) não seja
-  confundido com a sentinela "não aberto".
-- **Repetição `EINTR` no POSIX** — `pread` / `pwrite` repetem
-  ante interrupção por sinal em vez de falhar a E/S.
-- **mmap de comprimento zero no POSIX** — `map_readonly` rejeita
+- **MSVC** — decoração `__stdcall` do x86 e crash de `_wfsopen`
+  no x64 corrigidos.
+- **Clang** — guarda `-Wc2y-extensions` para Apple Clang anterior.
+- **Colisão de fd 0 em POSIX** — os handles de arquivo agora são
+  armazenados como `(fd + 1)` para que um fd 0 real (retornado por
+  `open()` quando stdin está fechado) não seja confundido com o
+  sentinela "não aberto".
+- **Reintento `EINTR` em POSIX** — `pread` / `pwrite` reintentam
+  após interrupção por sinal em vez de falhar na E/S.
+- **mmap de comprimento zero em POSIX** — `map_readonly` rejeita
   mapeamentos de comprimento zero em vez de chamar `mmap` com
   comprimento 0.
 
@@ -294,18 +404,17 @@ ARIES-lite.
 
 - Bloqueio de cabeçalho compartilhado ao abrir para que
   inserções concorrentes não falhem.
-- CDX estrutural nomeado por tabela, não por sessão de
-  diretório.
-- **Atualização da contagem de registros obsoleta no caminho de
-  leitura** — o driver faz cache da contagem de registros do DBF na
-  abertura; em uma implantação multiusuário um append de outro
-  processo podia deixar o cache defasado, então um percurso por
-  índice que alcançava uma linha recém-adicionada (p. ex. no meio de
-  `REPLACE … FOR`) falhava com um erro 5000 espúrio.
-  `read_record_raw` / `write_record_raw` agora releem a contagem em
-  disco sob um bloqueio de cabeçalho compartilhado antes de declarar
-  um recno fora de alcance (apenas caminho lento — uma varredura
-  normal para a frente não paga nada).
+- CDX estrutural nomeado por tabela, não por sessão de diretório.
+- **Atualização de contagem de registros obsoleta no caminho de
+  leitura** — o driver cacheia a contagem de registros do DBF ao
+  abrir; em um despligue multiusuário um append de outro processo
+  poderia deixar o cache defasado, de modo que uma varredura de
+  índice que alcançava uma linha recém-adicionada (ex: no meio de
+  `REPLACE … FOR`) falhava com erro 5000 espúrio.
+  `read_record_raw` / `write_record_raw` agora relêem a contagem
+  em disco sob um bloqueio de cabeçalho compartilhado antes de
+  declarar um recno fora do intervalo (só caminho lento — uma
+  varredura normal para a frente não paga nada).
 
 ### Remoto (Wire)
 
@@ -316,12 +425,12 @@ ARIES-lite.
 
 ## Documentação
 
-- **CONTRIBUTING.md** — novo guia de contribuição com fluxo de
-  PR, política de protocolo e regras de clean-room.
+- **CONTRIBUTING.md** — novo guia de contribuição com fluxo de PR,
+  política de protocolo e regras de clean-room.
 - **Wire Protocol DD API** — referência completa da API do
   Dicionário de Dados (§9) adicionada.
-- **DA-Web GUIDE.md** — guia completo do usuário para a
-  interface de navegador DA-Web.
+- **DA-Web GUIDE.md** — guia completo do usuário para a interface
+  de navegador DA-Web.
 - **README** — atualização completa do estado pós-rc29 cobrindo
   caminho de escrita ADI, criação ADT, modo AES e escopo do
   DA-Web.
@@ -329,25 +438,50 @@ ARIES-lite.
   executáveis e muito comentados (simples → avançado). A trilha
   `console/` é xBase puro: criar / seek por índice / transações /
   manutenção DBF (`ADSCDX`), SQL via `AdsCreateSQLStatement` +
-  `AdsExecuteSQLDirect`, ADT nativo (`ADSADT` + `.adi`) e um cliente
-  remoto `tcp://`. A trilha `orm/` roda o mesmo CRUD via um ORM
-  Harbour companheiro sobre back-ends SQLite / DBF / PostgreSQL /
-  MariaDB / ODBC, coroada por um benchmark de todos os back-ends
-  (`orm/complete/`) com checksum de conteúdo entre back-ends e
-  manchete seek-vs-scan. Um exemplo CRUD `xbrowse` de FiveWin e
-  guias de strings de conexão / tipos de campo / solução de
-  problemas completam o conjunto.
+  `AdsExecuteSQLDirect`, ADT nativo (`ADSADT` + `.adi`) e um
+  cliente remoto `tcp://`. A trilha `orm/` roda o mesmo CRUD
+  através de um ORM Harbour companion sobre back-ends SQLite / DBF
+  / PostgreSQL / MariaDB / ODBC, terminada com um benchmark de
+  todos os back-ends (`orm/complete/`) com checksum de conteúdo
+  entre back-ends e manchete seek-vs-scan. Uma amostra CRUD
+  `xbrowse` do FiveWin e guias de string de conexão / tipos de
+  campo / resolução de problemas completam.
+- **Referência da API (PT)** — todas as 364 funções ACE
+  documentadas em português com sintaxe, parâmetros, valores de
+  retorno e exemplos.
+
+---
+
+## Empacotamento
+
+- **Instalador Windows Inno Setup** (`openads-setup.iss`).
+- **Pacotes CPack** com `openace32.lib` / `openace64.lib`
+  garantidos nos arquivos Windows.
+- **Release CI** — `openace{32,64}.lib` incluídos automaticamente
+  nos arquivos de release.
 
 ---
 
 ## Testes
 
-- **564 testes unitários** passando em todas as plataformas
-  (48 127 asserções).
-- Novos arquivos de teste: `abi_adi_create_test.cpp` (criação
-  ADI, multi-tag, skip/seek populado) e
-  `abi_adt_scope_validation_test.cpp` (criação do zero, busca
-  dual-tag, ida e volta de memo, stress append, wire remoto,
-  sub processo serverd).
-- Smoke test de índices NTX do Wilson adicionado.
+- **874 testes unitários** passando em x64 e x86 (361 300+
+  asserções).
+- Novos arquivos de teste: `abi_cdx_tag_order_test.cpp` (ordem de
+  criação de tags CDX), `abi_cdx_expr_index_scale_test.cpp`
+  (tamanho de chave de índice de expressão em escala),
+  `abi_multitag_order_nav_test.cpp` (navegação multi-tag),
+  `abi_ntx_numeric_edge_test.cpp` (casos extremos numéricos NTX),
+  `cdx_empty_tree_test.cpp` e mais.
+- **CI x86** — build leg `msvc-x86` captura breakages de 32-bit
+  em cada PR.
 - Demo Harbour em `examples/adt-native/` (por glokcode).
+
+---
+
+## Contribuintes
+
+- **Jonsson / RusSoft Ltda.** — correções de ordem de tags CDX,
+  tamanho de chave de índice de expressão, filtro não otimizável
+  de `AdsSetAOF` e calling convention x86.
+- **Admnwk** — driver ODBC, push-down SQL, agregação,
+  FetchWhere V2, caminho de escrita nativo e melhorias de CI.

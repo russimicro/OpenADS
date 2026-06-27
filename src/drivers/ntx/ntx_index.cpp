@@ -273,7 +273,8 @@ util::Result<SeekOutcome> NtxIndex::seek_last() {
 }
 
 util::Result<SeekOutcome>
-NtxIndex::seek_key_for_write_(const std::string& padded, bool soft) {
+NtxIndex::seek_key_for_write_(const std::string& padded, bool soft,
+                             bool descend_to_leaf) {
     stack_.clear();
     if (root_page_ == 0) return SeekOutcome{SeekHit::AfterEnd, 0, false};
     std::uint32_t cur = root_page_;
@@ -295,7 +296,16 @@ NtxIndex::seek_key_for_write_(const std::string& padded, bool soft) {
         if (child == 0) {
             if (i >= kc) {
                 if (!soft) return SeekOutcome{SeekHit::AfterEnd, 0, false};
-                if (kc == 0) return SeekOutcome{SeekHit::AfterEnd, 0, false};
+                if (kc == 0) {
+                    // Empty-but-rooted leaf: reindex()/erase can clear every
+                    // key without resetting root_page_, leaving a 0-key root.
+                    // That is a valid insertion target — hand insert() the
+                    // leaf frame so it places the first key here, instead of
+                    // returning an empty descent stack that insert() rejects
+                    // with 5004 ("empty stack post-seek").
+                    stack_.push_back({cur, 0});
+                    return SeekOutcome{SeekHit::AfterEnd, 0, false};
+                }
                 stack_.push_back({cur, kc - 1});
                 if (auto r = load_current_key_(); !r) return r.error();
                 return SeekOutcome{SeekHit::AfterKey, current_recno_, true};
@@ -306,10 +316,13 @@ NtxIndex::seek_key_for_write_(const std::string& padded, bool soft) {
                                current_recno_, true};
         }
         stack_.push_back({cur, i});
-        if (found_exact) {
+        if (found_exact && !descend_to_leaf) {
+            // erase / read positioning: the key lives in this internal node.
             if (auto r = load_current_key_(); !r) return r.error();
             return SeekOutcome{SeekHit::Exact, current_recno_, true};
         }
+        // insert (descend_to_leaf): an exact match in a branch must NOT stop
+        // the descent — keep walking down so the new key is placed in a leaf.
         cur = child;
     }
     return SeekOutcome{SeekHit::AfterEnd, 0, false};
@@ -431,7 +444,11 @@ NtxIndex::insert(std::uint32_t recno, const std::string& key) {
     }
 
     // Locate insertion point via stack-based descent (cache is read-only path).
-    auto seek = seek_key_for_write_(padded, true);
+    // descend_to_leaf=true: never stop at an internal-node exact match — a
+    // B-tree insert must always reach a leaf (otherwise a duplicate key that
+    // was promoted to a branch would be inserted into that branch with a null
+    // child, orphaning its subtree).
+    auto seek = seek_key_for_write_(padded, true, /*descend_to_leaf=*/true);
     if (!seek) return seek.error();
 
     if (stack_.empty()) {
@@ -445,7 +462,8 @@ NtxIndex::insert(std::uint32_t recno, const std::string& key) {
 
     // Determine insertion index inside the leaf.
     std::int32_t insert_at = leaf_frame.key_index;
-    {
+    if (kc > 0) {
+        // A 0-key leaf has no entry to compare against; insert at slot 0.
         const std::uint8_t* kdata = get_key_data(leaf, insert_at);
         int cmp = std::memcmp(padded.data(), kdata, key_size_);
         if (cmp > 0) ++insert_at;
@@ -556,6 +574,15 @@ NtxIndex::insert(std::uint32_t recno, const std::string& key) {
             // position `pos` and update the entry now at pos+1 to
             // point its lchild at prop_right.
             std::uint16_t free_off = get_key_offset(parent, pkc);
+            // The parent's rightmost child lives in the sentinel slot
+            // offset[pkc] (= free_off) — the very slot we are about to
+            // reuse for the inserted key. Capture it BEFORE the shift so
+            // it can be reinstated as the new sentinel; otherwise a
+            // separator inserted anywhere left of the end (pos < pkc, the
+            // common case for runs of duplicate keys, which sort to the
+            // left subtree) drops the original right subtree, leaving an
+            // unreachable branch with a 0 right child.
+            std::uint32_t old_rightmost = get_left_child(parent, pkc);
             for (std::int32_t i = static_cast<std::int32_t>(pkc); i > pos; --i) {
                 set_key_offset(parent, i, get_key_offset(parent, i - 1));
             }
@@ -571,6 +598,13 @@ NtxIndex::insert(std::uint32_t recno, const std::string& key) {
             // The entry that was at pos has moved to pos+1; its
             // left_child should now be prop_right (the new sibling).
             put_left_child(parent, pos + 1, prop_right);
+            if (pos < static_cast<std::int32_t>(pkc)) {
+                // Inserted left of the end: pos+1 is an interior entry, so
+                // the new sentinel must carry the node's original rightmost
+                // child. (When pos == pkc the put_left_child above already
+                // wrote prop_right into the sentinel.)
+                put_left_child(parent, pkc + 1, old_rightmost);
+            }
 
             set_key_count(parent, pkc + 1);
             dirty_[parent_frame.page] = true;
@@ -608,9 +642,20 @@ NtxIndex::insert(std::uint32_t recno, const std::string& key) {
         pinsert.key    = prop_sep.key;
         ents.insert(ents.begin() +
             static_cast<std::ptrdiff_t>(pos), std::move(pinsert));
-        // The entry that was at pos now lives at pos+1; its lchild
-        // becomes prop_right (the new sibling we just produced).
-        ents[static_cast<std::size_t>(pos) + 1].lchild = prop_right;
+        // Wire prop_right (the new right sibling produced below us) into the
+        // node. If the separator landed before the end, the entry that was at
+        // `pos` now lives at pos+1 and takes prop_right as its left child, and
+        // the node keeps its original rightmost child. If it landed at the
+        // very end (pos == pkc, the common ascending-key case), there is no
+        // entry after it: prop_right becomes the node's new rightmost child.
+        // Indexing ents[pos+1] in that case would read past the vector.
+        std::uint32_t node_rightmost;
+        if (static_cast<std::size_t>(pos) + 1 < ents.size()) {
+            ents[static_cast<std::size_t>(pos) + 1].lchild = prop_right;
+            node_rightmost = right_sentinel;
+        } else {
+            node_rightmost = prop_right;
+        }
 
         std::size_t pmid = ents.size() / 2;
         std::vector<InternalEntry> p_left (ents.begin(),
@@ -652,8 +697,10 @@ NtxIndex::insert(std::uint32_t recno, const std::string& key) {
         // separator (since p_left contains entries strictly before
         // psep, and the next "boundary" is psep's lchild).
         fill_internal(parent_left,  p_left,  psep.lchild);
-        // Right half's rightmost child = the original sentinel.
-        fill_internal(parent_right, p_right, right_sentinel);
+        // Right half's rightmost child = the whole node's rightmost child
+        // (the original sentinel, or prop_right when the separator was
+        // appended at the end).
+        fill_internal(parent_right, p_right, node_rightmost);
 
         prop_left  = parent_left;
         prop_right = parent_right;
@@ -732,6 +779,19 @@ NtxIndex::erase(std::uint32_t recno, const std::string& key) {
     set_key_offset(leaf, kc, get_key_offset(leaf, kc));   // tail unchanged
 
     set_key_count(leaf, kc - 1);
+    if (kc - 1 == 0) {
+        // The leaf is now empty. The swap-to-tail scheme above leaves
+        // offset[0] pointing at the physical slot of the *last-removed*
+        // key, not the pristine first slot. A subsequent insert into this
+        // empty-but-rooted leaf (the PACK/reindex re-insert handled by the
+        // empty-leaf branch of seek_key_for_write_) takes offset[kc] as its
+        // free slot and marches the free pointer forward from there — off
+        // the end of the 1024-byte page once enough keys are re-inserted,
+        // corrupting the heap (surfaces as 6106 "short read on NTX page"
+        // and then a crash in flush()). Reset the page to a pristine empty
+        // layout so every free-slot offset is valid again.
+        format_empty_page(leaf, max_keys_, item_size_);
+    }
     dirty_[leaf_frame.page] = true;
     return {};
 }
