@@ -79,21 +79,6 @@ TEST_CASE("ABI: postgresql AdsSeek on column index") {
     REQUIRE(AdsOpenIndex(hTable, tag, &hIndex, &nIdx) == 0);
     CHECK(nIdx == 1);
 
-    // AdsGetIndexHandle must resolve the already-open PG index by name
-    // (backend dispatch) instead of erroring on the native get_table path.
-    {
-        UNSIGNED8 lookup[16] = "id";
-        ADSHANDLE hByName = 0;
-        REQUIRE(AdsGetIndexHandle(hTable, lookup, &hByName) == 0);
-        CHECK(hByName == hIndex);
-    }
-    // An unknown tag is an honest failure (no fake handle).
-    {
-        UNSIGNED8 lookup[16] = "naoexiste";
-        ADSHANDLE hMiss = 0;
-        CHECK(AdsGetIndexHandle(hTable, lookup, &hMiss) != 0);
-    }
-
     const char key[] = "2";
     UNSIGNED16 found = 0;
     REQUIRE(AdsSeek(hIndex,

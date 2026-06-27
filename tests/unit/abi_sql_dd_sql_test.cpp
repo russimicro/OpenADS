@@ -8,7 +8,6 @@
 
 #include "openads/ace.h"
 #include "openads/error.h"
-#include "test_dd_make.h"
 
 #include <array>
 #include <cstdint>
@@ -44,7 +43,8 @@ static void make_dbf(const std::string& path) {
 }
 
 static void write_dd(const std::string& path, const std::string& body) {
-    openads_test::make_dd(path, body);
+    std::ofstream f(path);
+    f << "# OpenADS Data Dictionary v1\n" << body;
 }
 
 // Execute SQL and return the record count from the resulting cursor.

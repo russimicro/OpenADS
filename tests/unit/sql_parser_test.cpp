@@ -375,36 +375,36 @@ TEST_CASE("comma-join: three+ comma tables parse for the N-way executor") {
 }
 
 TEST_CASE("comma-join: N-way with aliases, composite key and alias.* parse") {
-    // A 5-table header/detail + dimensions report shape: a composite join
-    // key (h<->d on two columns), qualified columns and a `<alias>.*`
+    // The shape the ERP inventory report issues: 5 tables, a composite join
+    // key (num↔mov on two columns), qualified columns and a `<alias>.*`
     // wildcard. All must parse; the executor consumes from_tables +
     // select_items + the WHERE equalities.
     auto r = parse_select(
-        "SELECT i.item_name, h.tx_date, d.* "
-        "FROM doctype AS dt, doc AS h, line AS d, "
-        "party AS p, item AS i "
-        "WHERE ( i.item_id = d.item_id ) AND "
-        "( h.party_id = p.party_id ) AND "
-        "( h.doctype_id = d.doctype_id AND h.doc_no = d.doc_no ) AND "
-        "( dt.doctype_id = h.doctype_id )");
+        "SELECT art.cnombreart, num.dfectratra, mov.* "
+        "FROM concepto AS con, conseinv AS num, moviminv AS mov, "
+        "clientes AS cli, articulo AS art "
+        "WHERE ( art.ccodigoart = mov.ccodigoart ) AND "
+        "( num.ccodigocli = cli.ccodigocli ) AND "
+        "( num.ccodigocon = mov.ccodigocon AND num.cdocumetra = mov.cdocumetra ) AND "
+        "( con.ccodigocon = num.ccodigocon )");
     REQUIRE(r.has_value());
     CHECK(r.value().from_tables.size() == 5);
-    CHECK(r.value().from_tables[1].alias == "h");
+    CHECK(r.value().from_tables[1].alias == "num");
     CHECK_FALSE(r.value().inner_join.has_value());
     // projection: two plain qualified columns + one alias.* wildcard
     REQUIRE(r.value().select_items.size() == 3);
-    CHECK(r.value().select_items[0].alias == "i");
-    CHECK(r.value().select_items[0].column == "item_name");
-    CHECK(r.value().select_items[1].alias == "h");
+    CHECK(r.value().select_items[0].alias == "art");
+    CHECK(r.value().select_items[0].column == "cnombreart");
+    CHECK(r.value().select_items[1].alias == "num");
     CHECK(r.value().select_items[2].wildcard);
-    CHECK(r.value().select_items[2].alias == "d");
+    CHECK(r.value().select_items[2].alias == "mov");
 }
 
 TEST_CASE("WHERE: ODBC date escape {d 'YYYY-MM-DD'} parses to digits") {
     // ADS uses `{d '...'}` date constants. Reduced to YYYYMMDD so it
     // string-compares against the DBF Date field's raw bytes.
     auto r = parse_select(
-        "SELECT * FROM doc WHERE tx_date >= {d '2026-01-01'}");
+        "SELECT * FROM ord WHERE dfectratra >= {d '2026-01-01'}");
     REQUIRE(r.has_value());
     REQUIRE(r.value().where);
     CHECK(r.value().where->cmp.literal == "20260101");

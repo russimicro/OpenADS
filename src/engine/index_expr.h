@@ -53,14 +53,6 @@ bool evaluate_index_expr_number(Table& t, const std::string& expr, double& out);
 // which compares keys as opaque bytes — needs no type awareness.
 std::string fox_numeric_key(double value);
 
-// Encode a double as the native DBFNTX numeric key (verified byte-for-byte
-// against Harbour DBFNTX `INDEX ON <numfield>`): the magnitude is zero-padded
-// to `width` with `dec` decimals via printf("%0*.*f"); for a negative value
-// every byte is complemented as (0x5c - byte) so negatives sort before
-// positives and the decimal point (0x2e, self-complementing) stays fixed.
-// The NTX B+tree compares keys as opaque bytes, so it needs no type awareness.
-std::string ntx_numeric_key(double value, std::uint16_t width, std::uint16_t dec);
-
 // Drop `ALIAS->` workarea qualifiers from a key/FOR expression so a
 // bare `FIELD->NAME` resolves to the plain field name `NAME`. Used by
 // the evaluator (write side) and by the ABI seek path so a numeric

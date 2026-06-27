@@ -193,7 +193,7 @@ TEST_CASE("AdsContinue: walks filter-matching records in order") {
     fs::remove(p);
 }
 
-TEST_CASE("AdsSetAOF: non-optimisable AOF succeeds with OPTIMIZED_NONE") {
+TEST_CASE("AdsSetAOF: non-optimisable AOF is rejected so the RDD filters client-side") {
     auto p = make_fixture("badparse");
     auto dir = p.parent_path().string();
     auto base = p.filename().string();
@@ -209,15 +209,22 @@ TEST_CASE("AdsSetAOF: non-optimisable AOF succeeds with OPTIMIZED_NONE") {
                              &hT) == 0);
 
         // UPPER(NAME) / Empty(NAME) are outside the optimisable AOF
-        // subset. ADS doesn't error on those — it declines to
-        // optimise (OPTIMIZED_NONE) and the client RDD filters
-        // client-side. AdsSetAOF must mirror that, not reject.
+        // subset, so OpenADS cannot build a server-side filter. It must
+        // return a non-SUCCESS code: Harbour's rddads adsSetFilter keys
+        // its "is this filter server-optimised?" decision solely off
+        // AdsSetAOF's return value (it never calls AdsGetAOFOptLevel).
+        // On AE_SUCCESS it would skip its own client-side row filter and
+        // SET FILTER would be silently inert (whole table walked). The
+        // non-SUCCESS return makes the RDD fall back to client-side
+        // filtering, which is correct.
         std::string cond = "Empty(NAME)";
         UNSIGNED32 rc = AdsSetAOF(hT,
                           reinterpret_cast<UNSIGNED8*>(cond.data()),
                           0);
-        CHECK(rc == 0);
+        CHECK(rc != 0);
 
+        // No AOF installed -> OPTIMIZED_NONE, and navigation is unfiltered
+        // (the RDD, not the engine, applies the row filter).
         UNSIGNED16 lvl = 0xFFFF;
         CHECK(AdsGetAOFOptLevel(hT, &lvl, nullptr, nullptr) == 0);
         CHECK(lvl == ADS_OPTIMIZED_NONE);

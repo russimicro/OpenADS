@@ -149,20 +149,6 @@ public:
                                   IndexOpenMode       mode,
                                   const std::string&  field_name);
 
-    // Create a new ADI file with one tag (expression = comma-separated column names).
-    // On return the AdiIndex is positioned on that tag and ready for inserts.
-    static util::Result<AdiIndex> create(const std::string& adi_path,
-                                         const std::string& adt_path,
-                                         const std::string& expression,
-                                         bool               unique);
-
-    // Add a new tag to an existing ADI file.
-    // On return the AdiIndex is positioned on the new tag and ready for inserts.
-    static util::Result<AdiIndex> add_tag(const std::string& adi_path,
-                                           const std::string& adt_path,
-                                           const std::string& expression,
-                                           bool               unique);
-
 private:
     // Read / write a 512-byte page from/to the ADI file
     util::Result<void> read_adi_page_ (std::uint32_t page_no, Page& buf);

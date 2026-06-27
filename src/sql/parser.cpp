@@ -523,7 +523,7 @@ parse_cmp(Cursor& c, const std::string& sql) {
     }
 
     if (c.peek_char('{')) {
-        // ADS / ODBC temporal escape on the RHS: `tx_date >= {d '...'}`.
+        // ADS / ODBC temporal escape on the RHS: `dfectratra >= {d '...'}`.
         // Reduced to digits so it string-compares against the Date field's
         // raw YYYYMMDD bytes.
         auto d = c.read_odbc_temporal_literal();
@@ -1768,9 +1768,7 @@ bool sql_is_create_table(const std::string& sql) {
 
 bool sql_is_create_index(const std::string& sql) {
     Cursor c(sql);
-    if (!c.match_keyword("CREATE")) return false;
-    c.match_keyword("UNIQUE");  // optional UNIQUE
-    return c.match_keyword("INDEX");
+    return c.match_keyword("CREATE") && c.match_keyword("INDEX");
 }
 
 bool sql_is_create_procedure(const std::string& sql) {
@@ -1954,13 +1952,10 @@ parse_create_index(const std::string& sql) {
     if (!c.match_keyword("CREATE")) {
         return util::Error{7200, 0, "expected CREATE", sql};
     }
-    CreateIndexStmt stmt;
-    if (c.match_keyword("UNIQUE")) {
-        stmt.unique = true;
-    }
     if (!c.match_keyword("INDEX")) {
         return util::Error{7200, 0, "expected INDEX", sql};
     }
+    CreateIndexStmt stmt;
     stmt.tag = c.read_identifier();
     if (stmt.tag.empty()) {
         return util::Error{7200, 0, "expected index tag name", sql};

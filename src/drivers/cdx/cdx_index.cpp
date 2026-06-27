@@ -1,8 +1,13 @@
 #include "drivers/cdx/cdx_index.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <unordered_map>
 
@@ -14,6 +19,62 @@ std::mutex g_cdx_alloc_mu;
 std::unordered_map<std::string, std::uint64_t> g_cdx_alloc_tail;
 
 constexpr std::uint32_t kCdxEraseDupGuard = 1048576;
+
+// ---- CDX write tracing (opt-in) --------------------------------------
+// Diagnostico "respeta indices originales": el invariante es que un
+// SELECT + INDEX ON ... TO <tmp> NO debe escribir el .cdx OFICIAL de
+// ninguna tabla fuente. Para cazar la escritura se loguea cada
+// `write_at` fisico al .cdx (path + offset + caller) a un log de texto.
+// Se activa con la variable de entorno OPENADS_CDX_WRITE_LOG=1 (o
+// =ruta). En produccion queda apagado -> costo cero.
+std::mutex g_cdxw_log_mu;
+bool g_cdxw_log_checked = false;
+std::string g_cdxw_log_path;
+
+const std::string& cdxw_log_path() {
+    if (!g_cdxw_log_checked) {
+        g_cdxw_log_checked = true;
+        // OPT-IN: apagado por defecto (costo cero en produccion). Se activa
+        // con OPENADS_CDX_WRITE_LOG=1/true -> C:\OpenADS\cdxwrite.log, o con
+        // OPENADS_CDX_WRITE_LOG=<ruta> para un destino custom. Cualquier otro
+        // valor (ausente, 0, false, vacio) deja el path vacio -> no loguea.
+        if (const char* e = std::getenv("OPENADS_CDX_WRITE_LOG")) {
+            std::string s = e;
+            if (s == "1" || s == "true" || s == "TRUE") {
+                g_cdxw_log_path = "C:\\OpenADS\\cdxwrite.log";
+            } else if (!s.empty() && s != "0" && s != "false" &&
+                       s != "FALSE") {
+                g_cdxw_log_path = s;   // ruta custom
+            }
+        }
+    }
+    return g_cdxw_log_path;
+}
+
+void cdxw_trace(std::uint64_t offset, std::size_t len, const char* why) {
+    const std::string& p = cdxw_log_path();
+    if (p.empty()) return;
+    std::lock_guard<std::mutex> lk(g_cdxw_log_mu);
+    std::ofstream out(p, std::ios::app);
+    if (!out) return;
+    using namespace std::chrono;
+    auto now = system_clock::now();
+    auto t = system_clock::to_time_t(now);
+    auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
+    std::tm tmv{};
+#if defined(_WIN32)
+    localtime_s(&tmv, &t);
+#else
+    localtime_r(&t, &tmv);
+#endif
+    char ts[40];
+    std::snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02d.%03lld",
+                  tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                  tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
+                  static_cast<long long>(ms.count()));
+    out << ts << "  off=" << offset << "  len=" << len
+        << "  " << (why ? why : "") << "\n";
+}
 
 std::string canonicalize_path(const std::string& path) {
     try {
@@ -82,7 +143,6 @@ struct LeafLayout {
 };
 
 LeafLayout compute_layout(std::uint16_t key_len,
-                          std::uint32_t max_rec,
                           std::uint8_t  req_byte_override = 0) {
     LeafLayout out{};
     std::uint16_t v = key_len;
@@ -90,34 +150,9 @@ LeafLayout compute_layout(std::uint16_t key_len,
     while (v) { ++b_bits; v >>= 1; }
     out.dc_bits  = b_bits;
     out.tc_bits  = b_bits;
-    if (req_byte_override) {
-        out.req_byte = req_byte_override;
-    } else {
-        // The packed entry must hold the record number ALONGSIDE the
-        // dup+trail count bits. Sizing req_byte from key_len ALONE
-        // (the old behaviour) starved the record-number field: a
-        // 40-byte key gave b_bits=6 -> req_byte=3 -> only 12 recno
-        // bits, so every recno >= 4096 was truncated mod 4096 (silent
-        // corruption: seek returns the wrong recno, ordered walks hit
-        // ADSCDX/5000 once the wrong recno lands out of range). Grow
-        // req_byte until rn_bits covers the largest recno on this page.
-        // FoxPro CDX leaves are self-describing (rec_bits/rec_mask/
-        // key_bytes live in each page header, read back in
-        // decode_compact_leaf_static), so per-page widths are legal and
-        // native-readable.
-        std::uint8_t min_rb = (b_bits > 12) ? 5 : (b_bits > 8 ? 4 : 3);
-        std::uint8_t rn_need = bits_for(max_rec);
-        std::uint8_t rb = static_cast<std::uint8_t>(
-            (rn_need + (b_bits << 1) + 7) >> 3);
-        if (rb < min_rb) rb = min_rb;
-        // The record number is carried in a u32 and the entry packing
-        // (and the struct-tag path) is proven up to 5 bytes; 5 bytes
-        // already yields >=16 recno bits for any key and ~268M recnos
-        // for a 40-byte key, beyond any practical DBF. Cap there so we
-        // never enter an untested 6-byte packing layout.
-        if (rb > 5) rb = 5;
-        out.req_byte = rb;
-    }
+    out.req_byte = req_byte_override
+        ? req_byte_override
+        : ((b_bits > 12) ? 5 : (b_bits > 8 ? 4 : 3));
     out.rn_bits  = static_cast<std::uint8_t>(
         (out.req_byte << 3) - (b_bits << 1));
     out.dc_mask  = (b_bits >= 32) ? 0xFFFFFFFFu : ((1u << b_bits) - 1);
@@ -139,11 +174,26 @@ encode_compact_leaf_static(
     std::uint32_t   right_sib,
     std::uint8_t    req_byte_override = 0)
 {
-    std::uint32_t max_rec = 0;
-    for (const auto& kv : keys) {
-        if (kv.second > max_rec) max_rec = kv.second;
+    // Choose req_byte so the packed entry can hold the largest recno in this
+    // leaf. compute_layout's default derives req_byte from the KEY length only
+    // (b_bits); for a large table that under-sizes RNBits and the recno gets
+    // masked (e.g. rn_bits=12 -> recno & 4095), pinning many keys to the wrong
+    // recno. Mirror Harbour hb_cdxPageLeafInitSpace: RNBits must cover the max
+    // recno, ReqByte = ceil((RNBits + 2*bBits)/8). build_bulk's PASS1 probe and
+    // PASS2 encode see the same key set per leaf, so the derived req_byte is
+    // consistent; each leaf stores it in p[23] and decode reads it back.
+    if (req_byte_override == 0 && !keys.empty()) {
+        std::uint32_t max_rec = 0;
+        for (const auto& kv : keys)
+            if (kv.second > max_rec) max_rec = kv.second;
+        std::uint8_t bb = 0;
+        for (std::uint16_t vv = key_size; vv; vv >>= 1) ++bb;
+        std::uint8_t rn_need = bits_for(max_rec);
+        int rb = (static_cast<int>(rn_need) + 2 * static_cast<int>(bb) + 7) / 8;
+        if (rb < 3) rb = 3;
+        req_byte_override = static_cast<std::uint8_t>(rb);
     }
-    LeafLayout L = compute_layout(key_size, max_rec, req_byte_override);
+    LeafLayout L = compute_layout(key_size, req_byte_override);
     const std::uint32_t rec_mask = L.rn_mask;
     const std::uint8_t  rec_bits = L.rn_bits;
     const std::uint8_t  dup_bits = L.dc_bits;
@@ -151,18 +201,6 @@ encode_compact_leaf_static(
     const std::uint32_t dup_mask = L.dc_mask;
     const std::uint32_t trl_mask = L.tc_mask;
     const std::uint8_t  key_bytes = L.req_byte;
-
-    // Fail loud instead of silently truncating. compute_layout grows the
-    // record-number field to fit max_rec, but that width is capped at the
-    // 5-byte struct-tag layout (and req_byte_override fixes it outright).
-    // If the resulting rn_bits cannot represent the largest recno on this
-    // page, `recno & rec_mask` below would drop the high bits and corrupt
-    // the index silently. Refuse the encode instead — a 5000 here is far
-    // better than an out-of-range recno surfacing on a later ordered walk.
-    if (max_rec > rec_mask) {
-        return util::Error{5000, 0,
-            "CDX leaf encode: record number exceeds index capacity", ""};
-    }
 
     std::fill(p.begin(), p.end(), std::uint8_t{0});
     write_u16_le(p.data() + 0, CDX_NODE_LEAF);
@@ -465,6 +503,8 @@ util::Result<CdxIndex::Page*> CdxIndex::get_page_(std::uint32_t offset) {
 util::Result<void> CdxIndex::flush_page_(std::uint32_t offset) {
     auto it = page_cache_.find(offset);
     if (it == page_cache_.end()) return {};
+    cdxw_trace(static_cast<std::uint64_t>(offset), it->second.size(),
+               ("flush_page_  cdx=" + path_).c_str());
     auto wrote = file_.write_at(offset, it->second.data(), it->second.size());
     if (!wrote) return wrote.error();
     if (wrote.value() != it->second.size()) {
@@ -485,6 +525,8 @@ CdxIndex::open_named(const std::string& path,
                      const std::string& tag_name) {
     mode_  = mode;
     path_  = canonicalize_path(path);
+    cdxw_trace(0, 0, ("OPEN  cdx=" + path_ + "  mode=" +
+        std::to_string(static_cast<int>(mode_))).c_str());
     auto fres = platform::File::open(path, map_mode(mode));
     if (!fres) return fres.error();
     file_ = std::move(fres).value();
@@ -590,38 +632,6 @@ CdxIndex::encode_leaf_(std::uint32_t page_off,
     return {};
 }
 
-util::Result<void> CdxIndex::skip_empty_leaves_right_(
-    std::uint32_t& leaf,
-    std::vector<std::pair<std::string, std::uint32_t>>& out) {
-    while (true) {
-        auto dec = decode_leaf_(leaf);
-        if (!dec) return dec.error();
-        out = std::move(dec).value();
-        if (!out.empty()) return {};
-        auto pg = get_page_(leaf);
-        if (!pg) return pg.error();
-        std::uint32_t right = read_u32_le(pg.value()->data() + 8);
-        if (right == 0xFFFFFFFFu || right == 0) { out.clear(); return {}; }
-        leaf = right;
-    }
-}
-
-util::Result<void> CdxIndex::skip_empty_leaves_left_(
-    std::uint32_t& leaf,
-    std::vector<std::pair<std::string, std::uint32_t>>& out) {
-    while (true) {
-        auto dec = decode_leaf_(leaf);
-        if (!dec) return dec.error();
-        out = std::move(dec).value();
-        if (!out.empty()) return {};
-        auto pg = get_page_(leaf);
-        if (!pg) return pg.error();
-        std::uint32_t left = read_u32_le(pg.value()->data() + 4);
-        if (left == 0xFFFFFFFFu || left == 0) { out.clear(); return {}; }
-        leaf = left;
-    }
-}
-
 util::Result<SeekOutcome> CdxIndex::seek_first() {
     cur_leaf_   = 0;
     cur_index_  = -1;
@@ -652,10 +662,9 @@ util::Result<SeekOutcome> CdxIndex::seek_first() {
         }
     }
 
-    // Leftmost leaf may be empty (erase leaves holes); advance to the
-    // first non-empty leaf before positioning.
-    if (auto sk = skip_empty_leaves_right_(cur_leaf_, cur_decoded_); !sk)
-        return sk.error();
+    auto dec = decode_leaf_(cur_leaf_);
+    if (!dec) return dec.error();
+    cur_decoded_ = std::move(dec).value();
     if (cur_decoded_.empty()) {
         return SeekOutcome{SeekHit::AfterEnd, 0, false};
     }
@@ -678,14 +687,11 @@ util::Result<SeekOutcome> CdxIndex::seek_last() {
         if (!pg) return pg.error();
         std::uint32_t right = read_u32_le(pg.value()->data() + 8);
         if (right == 0xFFFFFFFFu || right == 0) break;
-        // Probe forward over any empty leaves; only move if a non-empty
-        // leaf remains, so holes don't cut the walk short of the true last.
-        std::uint32_t probe = right;
-        std::vector<std::pair<std::string, std::uint32_t>> nxt;
-        if (auto sk = skip_empty_leaves_right_(probe, nxt); !sk) return sk.error();
-        if (nxt.empty()) break;
-        cur_leaf_ = probe;
-        cur_decoded_ = std::move(nxt);
+        cur_leaf_ = right;
+        auto dec = decode_leaf_(cur_leaf_);
+        if (!dec) return dec.error();
+        cur_decoded_ = std::move(dec).value();
+        if (cur_decoded_.empty()) break;
     }
     if (cur_decoded_.empty()) {
         return SeekOutcome{SeekHit::AfterEnd, 0, false};
@@ -703,16 +709,6 @@ CdxIndex::seek_key(const std::string& key, bool soft) {
     if (padded.size() < key_size_) padded.append(key_size_ - padded.size(), ' ');
     if (padded.size() > key_size_) padded.resize(key_size_);
 
-    // Clipper / DBFCDX partial-seek: a search key SHORTER than the index
-    // key matches on the PREFIX (finds the first stored key beginning
-    // with it). Compare only over the original search-key length, not the
-    // space-padded full width — otherwise SEEK "ART-00024800" against a
-    // stored "ART-00024800 desc ..." key misses (the search's trailing
-    // spaces sort below the stored "desc"). A full-length key gives
-    // cmp_len == key_size_, so exact seeks are unchanged.
-    const std::size_t cmp_len =
-        std::min<std::size_t>(key.size(), key_size_);
-
     auto first = seek_first();
     if (!first) return first.error();
     if (!first.value().positioned) {
@@ -722,7 +718,7 @@ CdxIndex::seek_key(const std::string& key, bool soft) {
     while (true) {
         for (std::size_t i = 0; i < cur_decoded_.size(); ++i) {
             int cmp = std::memcmp(padded.data(), cur_decoded_[i].first.data(),
-                                  cmp_len);
+                                  key_size_);
             if (cmp == 0) {
                 cur_index_ = static_cast<std::int32_t>(i);
                 cur_state_ = CurState::Positioned;
@@ -757,10 +753,9 @@ CdxIndex::seek_key(const std::string& key, bool soft) {
         std::uint32_t right = read_u32_le(pg.value()->data() + 8);
         if (right == 0xFFFFFFFFu || right == 0) break;
         cur_leaf_ = right;
-        // Skip over empty leaves (erase leaves holes) so the scan keeps
-        // finding live keys instead of stopping at the first hole.
-        if (auto sk = skip_empty_leaves_right_(cur_leaf_, cur_decoded_); !sk)
-            return sk.error();
+        auto dec = decode_leaf_(cur_leaf_);
+        if (!dec) return dec.error();
+        cur_decoded_ = std::move(dec).value();
         if (cur_decoded_.empty()) break;
     }
     // Search key was strictly greater than every key in the tree.
@@ -828,10 +823,9 @@ util::Result<SeekOutcome> CdxIndex::next() {
         return SeekOutcome{SeekHit::AfterEnd, 0, false};
     }
     cur_leaf_ = right;
-    // Skip empty leaves (erase leaves holes) so SKIP(+1) lands on the
-    // next live key rather than falsely reporting end-of-index.
-    if (auto sk = skip_empty_leaves_right_(cur_leaf_, cur_decoded_); !sk)
-        return sk.error();
+    auto dec = decode_leaf_(cur_leaf_);
+    if (!dec) return dec.error();
+    cur_decoded_ = std::move(dec).value();
     if (cur_decoded_.empty()) {
         cur_index_ = -1;
         cur_state_ = CurState::AfterEnd;
@@ -884,10 +878,9 @@ util::Result<SeekOutcome> CdxIndex::prev() {
         return SeekOutcome{SeekHit::BeforeBegin, 0, false};
     }
     cur_leaf_ = left;
-    // Skip over empty leaves (erase leaves holes) so SKIP(-1) lands on the
-    // previous live key rather than falsely reporting begin-of-index.
-    if (auto sk = skip_empty_leaves_left_(cur_leaf_, cur_decoded_); !sk)
-        return sk.error();
+    auto dec = decode_leaf_(cur_leaf_);
+    if (!dec) return dec.error();
+    cur_decoded_ = std::move(dec).value();
     if (cur_decoded_.empty()) {
         cur_index_ = -1;
         cur_state_ = CurState::BeforeBegin;
@@ -1472,6 +1465,8 @@ util::Result<void> CdxIndex::set_options(bool unique, bool descend,
     if (new_key_size != 0)
         write_u16_le(hdr.data() + 12, new_key_size);
     write_u16_le(hdr.data() + 502, descend ? 1 : 0);
+    cdxw_trace(static_cast<std::uint64_t>(sub_header_offset_), hdr.size(),
+               ("set_options  cdx=" + path_).c_str());
     auto wrote = file_.write_at(sub_header_offset_, hdr.data(), hdr.size());
     if (!wrote) return wrote.error();
     return {};
@@ -1496,6 +1491,8 @@ util::Result<void> CdxIndex::free_tree_(std::uint32_t off) {
     // the cache is cleared) and make it the new head.
     Page link{};
     write_u32_le(link.data(), free_ptr_);
+    cdxw_trace(static_cast<std::uint64_t>(off), link.size(),
+               ("free_tree_  cdx=" + path_).c_str());
     auto w = file_.write_at(off, link.data(), link.size());
     if (!w) return w.error();
     if (w.value() < link.size()) {
@@ -1571,6 +1568,8 @@ util::Result<void> CdxIndex::rewrite_header_() {
     write_u32_le(hdr.data() + 0, root_page_);
     write_u32_le(hdr.data() + 4, free_ptr_);
     write_u32_le(hdr.data() + 8, ++counter_);
+    cdxw_trace(static_cast<std::uint64_t>(sub_header_offset_), hdr.size(),
+               ("rewrite_header_  cdx=" + path_).c_str());
     auto wrote = file_.write_at(sub_header_offset_, hdr.data(), hdr.size());
     if (!wrote) return wrote.error();
     return {};
@@ -1708,9 +1707,24 @@ CdxIndex::list_tags(const std::string& path) {
     }
     auto dec = decode_compact_leaf_static(leaf, CDX_STRUCT_KEY_LEN);
     if (!dec) return dec.error();
+    // ADS enumerates CDX tags in CREATION order = ascending tag-header offset
+    // (the 2nd field of each struct-leaf entry), NOT the leaf's alphabetical
+    // key order. A CDX written by ADS-SAP / BCC keeps its structure tag sorted
+    // by tag NAME, so returning the leaf order here renumbers the tags and the
+    // RDD's DBSETORDER(n) picks the wrong order (the ERP saw order 1 = ARTICLAS
+    // instead of ARTICULO, so the grid "didn't sort by column"). Sorting by the
+    // tag-header offset matches ADS-SAP's tag numbering. A CDX written by
+    // OpenADS already has its struct leaf in creation order, so this is a no-op
+    // there and existing tests stay green.
+    auto entries = std::move(dec).value();
+    std::stable_sort(entries.begin(), entries.end(),
+                     [](const std::pair<std::string, std::uint32_t>& a,
+                        const std::pair<std::string, std::uint32_t>& b) {
+                         return a.second < b.second;
+                     });
     std::vector<std::string> out;
-    out.reserve(dec.value().size());
-    for (auto& e : dec.value()) {
+    out.reserve(entries.size());
+    for (auto& e : entries) {
         std::string t = e.first;
         while (!t.empty() && t.back() == ' ') t.pop_back();
         out.push_back(std::move(t));

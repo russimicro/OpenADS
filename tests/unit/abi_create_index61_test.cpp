@@ -162,20 +162,15 @@ TEST_CASE("M9.7 AdsCreateIndex61 supports compound expressions (UPPER)") {
     fs::remove_all(dir, ec);
 }
 
-TEST_CASE("M12.23 AdsCreateIndex61 option bits: direction across RDD clients") {
-    // The two RDD clients put the compound/descending flags on SWAPPED bits
-    // of ulOptions (measured by instrumenting AdsCreateIndex61):
-    //
-    //   client          ascending tag   descending tag
-    //   X#  ADSRDD       0x02            0x0A   (compound 0x02 | descending 0x08)
-    //   Harbour rddads   0x08            0x0A   (compound 0x08 | descending 0x02)
-    //
-    // Each client always sets ITS compound bit on every tag, so a LONE 0x02
-    // (X# ascending) or LONE 0x08 (Harbour ascending) is ascending, and
-    // descending is the one case where BOTH bits are set (0x0A). No real
-    // client emits a lone 0x08 to mean descending, so it must decode as
-    // ascending — otherwise every Harbour order builds reversed (DbGoTop on
-    // the last key, SKIP backward). Fixture records: BBBB(1), AAAA(2), CCCC(3).
+TEST_CASE("M12.23 AdsCreateIndex61 option bits: ADS_COMPOUND is not ADS_DESCENDING") {
+    // rddads / X#'s ADSRDD always pass ADS_COMPOUND when creating a CDX
+    // order. That bit must be ignored, not treated as ADS_DESCENDING —
+    // otherwise every order is built descending and DbGoTop lands on the
+    // last key. Real option-bit values (verified against rddads, in
+    // include/openads/ace.h): ADS_COMPOUND 0x02, ADS_DESCENDING 0x08.
+    // The literal-0x02 case below pins what rddads actually sends —
+    // testing only the symbol ADS_COMPOUND let the 0x02/0x08 swap ship.
+    // Fixture records: BBBB(1), AAAA(2), CCCC(3).
     auto dir = fs::temp_directory_path() / "openads_m1223_ci_opts";
     std::error_code ec;
 
@@ -204,13 +199,12 @@ TEST_CASE("M12.23 AdsCreateIndex61 option bits: direction across RDD clients") {
         REQUIRE(AdsDisconnect(hConn) == 0);
     };
 
-    run(ADS_COMPOUND, 2u);                        // X# compound (0x02) → ascending (rec 2)
-    run(ADS_DESCENDING, 2u);                      // Harbour compound (0x08) → ascending (rec 2)
-    run(ADS_COMPOUND | ADS_DESCENDING, 3u);       // both bits (0x0A) → descending (rec 3)
-    // Regression: the EXACT raw bits each client sends, as literals — these
+    run(ADS_COMPOUND, 2u);                        // ascending → AAAA (rec 2)
+    run(ADS_COMPOUND | ADS_DESCENDING, 3u);       // descending → CCCC (rec 3)
+    run(ADS_DESCENDING, 3u);                      // descending → CCCC (rec 3)
+    // Regression: the EXACT raw bits rddads sends, as literals — these
     // must not depend on the symbol values staying correct.
-    run(0x02u, 2u);                               // X# `INDEX ON`        → ascending
-    run(0x08u, 2u);                               // Harbour `INDEX ON`   → ascending
-    run(0x0Au, 3u);                               // `... DESCENDING`     → descending
+    run(0x02u, 2u);                               // rddads `INDEX ON` → ascending
+    run(0x0Au, 3u);                               // rddads `... DESCENDING` → descending
     fs::remove_all(dir, ec);
 }

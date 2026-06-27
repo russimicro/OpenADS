@@ -61,6 +61,31 @@ std::vector<UNSIGNED32> walk(ADSHANDLE hCur) {
     return out;
 }
 
+// The ORDER BY result is now a materialised static cursor (ADS_CDX semantics):
+// its recnos are 1..N in result order, so asserting source recnos no longer
+// distinguishes ASC from DESC. Walk the sorted COLUMN VALUE instead — that is
+// the actual ORDER BY contract.
+std::vector<std::string> walk_vals(ADSHANDLE hCur, const char* name) {
+    std::vector<std::string> out;
+    if (AdsGotoTop(hCur) != 0) return out;
+    UNSIGNED8 fn[16] = {0};
+    std::memcpy(fn, name, std::strlen(name) + 1);
+    while (true) {
+        UNSIGNED16 atend = 0;
+        if (AdsAtEOF(hCur, &atend) != 0 || atend) break;
+        UNSIGNED8 buf[32] = {0};
+        UNSIGNED32 cap = sizeof(buf);
+        std::string v;
+        if (AdsGetField(hCur, fn, buf, &cap, 0) == 0) {
+            v.assign(reinterpret_cast<char*>(buf), cap);
+            while (!v.empty() && v.back() == ' ') v.pop_back();
+        }
+        out.push_back(v);
+        if (AdsSkip(hCur, 1) != 0) break;
+    }
+    return out;
+}
+
 }  // namespace
 
 TEST_CASE("M10.6 SQL ORDER BY ascending walks rows in sorted order") {
@@ -81,13 +106,12 @@ TEST_CASE("M10.6 SQL ORDER BY ascending walks rows in sorted order") {
     ADSHANDLE hCur = 0;
     REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
 
-    auto seq = walk(hCur);
-    // AAAA(2), BBBB(4), CCCC(1), DDDD(3).
+    auto seq = walk_vals(hCur, "TAG");
     REQUIRE(seq.size() == 4);
-    CHECK(seq[0] == 2);
-    CHECK(seq[1] == 4);
-    CHECK(seq[2] == 1);
-    CHECK(seq[3] == 3);
+    CHECK(seq[0] == "AAAA");
+    CHECK(seq[1] == "BBBB");
+    CHECK(seq[2] == "CCCC");
+    CHECK(seq[3] == "DDDD");
 
     REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
@@ -112,12 +136,12 @@ TEST_CASE("M10.6 SQL ORDER BY DESC reverses the order") {
     ADSHANDLE hCur = 0;
     REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
 
-    auto seq = walk(hCur);
+    auto seq = walk_vals(hCur, "TAG");
     REQUIRE(seq.size() == 4);
-    CHECK(seq[0] == 3);   // DDDD
-    CHECK(seq[1] == 1);   // CCCC
-    CHECK(seq[2] == 4);   // BBBB
-    CHECK(seq[3] == 2);   // AAAA
+    CHECK(seq[0] == "DDDD");
+    CHECK(seq[1] == "CCCC");
+    CHECK(seq[2] == "BBBB");
+    CHECK(seq[3] == "AAAA");
 
     REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
@@ -224,17 +248,17 @@ TEST_CASE("M10.6 SQL ORDER BY combines with WHERE") {
     ADSHANDLE hStmt = 0;
     REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
 
-    // TAG > 'AAAA' filters {1,3,4}. ORDER BY TAG → BBBB(4), CCCC(1), DDDD(3).
+    // TAG > 'AAAA' filters out AAAA. ORDER BY TAG → BBBB, CCCC, DDDD.
     UNSIGNED8 sql[200] =
         "SELECT * FROM data.dbf WHERE TAG > 'AAAA' ORDER BY TAG";
     ADSHANDLE hCur = 0;
     REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
 
-    auto seq = walk(hCur);
+    auto seq = walk_vals(hCur, "TAG");
     REQUIRE(seq.size() == 3);
-    CHECK(seq[0] == 4);
-    CHECK(seq[1] == 1);
-    CHECK(seq[2] == 3);
+    CHECK(seq[0] == "BBBB");
+    CHECK(seq[1] == "CCCC");
+    CHECK(seq[2] == "DDDD");
 
     REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);

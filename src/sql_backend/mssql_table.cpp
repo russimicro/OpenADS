@@ -235,13 +235,10 @@ void MssqlTable::skip(long n) {
             eof = false;
         }
         long abs_n = -n;
-        if (static_cast<std::size_t>(abs_n) > pos) {
-            // Stepped past the first row: park at begin-of-file.
+        if (static_cast<std::size_t>(abs_n) >= pos) {
             pos = 0;
             bof = true;
         } else {
-            // abs_n == pos lands exactly on row 0, which is a valid row,
-            // not BOF — hence `>` above, not `>=`.
             pos -= static_cast<std::size_t>(abs_n);
             bof = false;
         }

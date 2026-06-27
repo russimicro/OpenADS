@@ -16,13 +16,7 @@ util::Error os_error(const char* op) {
                  ? 5103   // AE_TABLE_NOT_FOUND-style placeholder
                  : 5000;  // AE_INTERNAL_ERROR placeholder
     e.sub_code = static_cast<std::int32_t>(code);
-    char buf[256] = {};
-    ::FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                     nullptr, code, 0, buf, sizeof(buf) - 1, nullptr);
-    // Strip trailing CR/LF that FormatMessage appends
-    for (int i = static_cast<int>(strlen(buf)) - 1; i >= 0 && (buf[i] == '\r' || buf[i] == '\n'); --i)
-        buf[i] = '\0';
-    e.message = std::string(op) + ": " + (buf[0] ? buf : "error " + std::to_string(code));
+    e.message = op;
     return e;
 }
 

@@ -5,7 +5,6 @@
 #include "doctest.h"
 #include "openads/ace.h"
 #include "openads/error.h"
-#include "test_dd_make.h"
 
 #include <array>
 #include <cstdint>
@@ -73,11 +72,11 @@ fs::path make_log_dbf(const fs::path& dir, char initial_flag) {
 // event_mask: 1=INSERT 2=UPDATE 3=DELETE   timing: 1=BEFORE 2=INSTEAD_OF 4=AFTER
 fs::path make_fire_add(const fs::path& dir, const std::string& trigger_lines) {
     auto p = dir / "fire.add";
-    std::string body =
-        "TABLE orders=orders.dbf\n"
-        "TABLE log=log.dbf\n"
-        + trigger_lines;
-    openads_test::make_dd(p, body);
+    std::ofstream f(p);
+    f << "# OpenADS Data Dictionary v1\n"
+      << "TABLE orders=orders.dbf\n"
+      << "TABLE log=log.dbf\n"
+      << trigger_lines;
     return p;
 }
 

@@ -1,7 +1,5 @@
 #include "doctest.h"
 
-#include <cstdint>
-
 #include "sql_backend/uri.h"
 
 using openads::sql_backend::SqliteUri;

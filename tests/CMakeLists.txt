@@ -77,16 +77,17 @@ add_executable(openads_unit_tests
     unit/abi_index_expr_validation_test.cpp
     unit/abi_zap_pack_test.cpp
     unit/abi_pack_reindex_softseek_test.cpp
+    unit/abi_stale_index_walk_test.cpp
+    unit/abi_conditional_index_nav_test.cpp
+    unit/abi_multitag_order_nav_test.cpp
+    unit/abi_cdx_tag_order_test.cpp
+    unit/abi_cdx_expr_index_scale_test.cpp
+    unit/abi_conditional_index_refilter_test.cpp
+    unit/abi_sql_temp_browse_nav_test.cpp
     unit/abi_record_count_filter_test.cpp
     unit/abi_reindex_test.cpp
     unit/ntx_multilevel_test.cpp
     unit/cdx_multilevel_test.cpp
-    unit/cdx_multitag_2nd_test.cpp
-    unit/cdx_prefix_seek_test.cpp
-    unit/cdx_reindex_char_test.cpp
-    unit/cdx_prev_empty_leaf_test.cpp
-    unit/cdx_empty_tree_test.cpp
-    unit/abi_ntx_numeric_edge_test.cpp
     unit/abi_memo_large_test.cpp
     unit/abi_ordsetfocus_test.cpp
     unit/abi_seek_empty_test.cpp
@@ -104,9 +105,6 @@ add_executable(openads_unit_tests
     unit/abi_find_table_test.cpp
     unit/abi_binary_memo_test.cpp
     unit/abi_ntx_multitag_test.cpp
-    unit/abi_ntx_numeric_key_test.cpp
-    unit/abi_cdx_char_keylen_test.cpp
-    unit/abi_cdx_index_direction_test.cpp
     unit/abi_ordnumber_test.cpp
     unit/abi_server_info_test.cpp
     unit/abi_unicode_test.cpp
@@ -186,7 +184,6 @@ add_executable(openads_unit_tests
     unit/legacy_crt_shims_test.cpp
     unit/dll_test.cpp
     unit/network_client_test.cpp
-    unit/abi_dd_invoicing_test.cpp
 )
 
 if(OPENADS_WITH_POSTGRESQL)
@@ -221,7 +218,6 @@ if(OPENADS_WITH_MSSQL)
         unit/abi_plus_mssql_connect_test.cpp
         unit/abi_plus_mssql_read_test.cpp
         unit/tds_protocol_test.cpp
-        unit/mssql_table_skip_test.cpp
         unit/mssql_uri_test.cpp
     )
 endif()

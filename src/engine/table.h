@@ -95,6 +95,13 @@ public:
     util::Result<void> goto_top();
     util::Result<void> goto_bottom();
     util::Result<void> goto_record(std::uint32_t recno);
+    // Sequential index-build / scan positioning by recno. Unlike
+    // goto_record, it does NOT reposition the active-order cursor
+    // (compute_index_key_ + seek_key O(log n) + walk) per record, nor
+    // invalidate the read cache. A build loop reads fields from the current
+    // record buffer and never uses the active-order cursor, so this is
+    // transparent — and ~20x faster when a random-ordered index is active.
+    util::Result<void> goto_record_for_build(std::uint32_t recno);
     // Reload the current row from disk without repositioning the active
     // index cursor — used after transaction rollback refresh.
     util::Result<void> refresh_record_buffer();
@@ -194,7 +201,7 @@ public:
     // restores the natural order.
     void set_recno_sequence(std::vector<std::uint32_t> seq);
     void clear_recno_sequence() noexcept {
-        recno_sequence_.clear(); sequence_idx_ = -1;
+        recno_sequence_.clear(); recno_seq_index_.clear(); sequence_idx_ = -1;
     }
     bool has_recno_sequence() const noexcept {
         return !recno_sequence_.empty();
@@ -203,6 +210,17 @@ public:
     // can post-process an ORDER-BY-installed sequence.
     const std::vector<std::uint32_t>& recno_sequence() const noexcept {
         return recno_sequence_;
+    }
+    // 0-based position of `recno` within the installed sequence, or -1 if no
+    // sequence is installed / recno isn't in it. O(1) via a recno->index map
+    // built alongside the sequence. Lets goto_record re-sync sequence_idx_
+    // after an absolute reposition (bookmark restore) and lets the browse
+    // position primitives (OrdKeyNo / GetRelKeyPos / KeyCount) report the
+    // visible-set position instead of the physical recno.
+    std::int64_t recno_sequence_index(std::uint32_t recno) const noexcept {
+        auto it = recno_seq_index_.find(recno);
+        return it == recno_seq_index_.end()
+                   ? -1 : static_cast<std::int64_t>(it->second);
     }
 
     // Memo surface (M4).
@@ -380,6 +398,10 @@ private:
 
     // M10.6 recno-sequence cursor — empty means "natural order".
     std::vector<std::uint32_t>                    recno_sequence_;
+    // recno -> 0-based position in recno_sequence_ (O(1) reverse lookup,
+    // rebuilt by set_recno_sequence). Keeps goto_record's sequence_idx_
+    // re-sync and the browse position primitives off an O(N) scan.
+    std::unordered_map<std::uint32_t, std::uint32_t> recno_seq_index_;
     std::int64_t                                  sequence_idx_ = -1;
 };
 

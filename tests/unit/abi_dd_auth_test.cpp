@@ -1,7 +1,6 @@
 #include "doctest.h"
 #include "openads/ace.h"
 #include "openads/error.h"
-#include "test_dd_make.h"
 
 #include <array>
 #include <cstdint>
@@ -15,16 +14,17 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// Create a minimal DD that requires login.
+// Write a minimal text-format DD that requires login.
 // Creates one user "alice" with password "secret" (prop_1101).
 fs::path make_auth_add(const fs::path& dir, bool require_login) {
     auto p = dir / "test.add";
-    std::string body =
-        "TABLE tbl=tbl.dbf\n"
-        "USER alice\n"
-        "USERPROP alice;prop_1101=secret\n";
-    if (require_login) body += "DBPROP prop_5=1\n";
-    openads_test::make_dd(p, body);
+    std::ofstream f(p);
+    f << "# OpenADS Data Dictionary v1\n"
+      << "TABLE tbl=tbl.dbf\n"
+      << "USER alice\n"
+      << "USERPROP alice;prop_1101=secret\n";
+    if (require_login)
+        f << "DBPROP prop_5=1\n";
     return p;
 }
 

@@ -2894,13 +2894,7 @@ UNSIGNED32 AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 /*usServerType*/,
     if (raw->has_dd()) {
         auto* dd = raw->dd();
         std::string login_req = dd->get_db_property("prop_5");
-        // Stored as decimal string by import tool and UI: "0" = not required,
-        // "1" = required.  Keep raw-byte fallback for any old imports.
-        bool is_raw_zero = (login_req.size() >= 2 &&
-                            static_cast<unsigned char>(login_req[0]) == 0 &&
-                            static_cast<unsigned char>(login_req[1]) == 0);
-        bool require_login = (!login_req.empty() && login_req != "0" &&
-                              login_req != "False" && !is_raw_zero);
+        bool require_login = (!login_req.empty() && login_req != "0");
         std::string user = pucUser ? openads::abi::to_internal(pucUser, 0)
                                    : std::string();
         std::string pwd  = pucPwd  ? openads::abi::to_internal(pucPwd, 0)
@@ -2915,13 +2909,8 @@ UNSIGNED32 AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 /*usServerType*/,
             if (stored != pwd)
                 return fail(openads::AE_LOGIN_FAILED, "invalid password");
         }
-        if (!user.empty()) {
+        if (!user.empty())
             raw->set_username(user);
-            // Pre-build effective-permission cache for this user so that
-            // subsequent AdsOpenTable / AdsExecuteSQLDirect checks are O(1).
-            if (dd->has_any_acl())
-                dd->build_perm_cache(user);
-        }
     }
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
@@ -2929,20 +2918,12 @@ UNSIGNED32 AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 /*usServerType*/,
     s.conns.emplace(h, std::move(holder));
     *phConnect = h;
     rddads_default_connection() = h;
-    // Reject connections to SAP proprietary binary .add files.  OpenADS
-    // can read them (load_add_binary_) but cannot safely write them back
-    // (format is closed and permission fields are encrypted).  Direct the
-    // caller to run the import_dd tool to produce an OpenADS-format DD.
-    if (raw->has_dd() && raw->dd()->has_sap_permissions()) {
-        s.conns.erase(h);   // destroys the Connection object
-        s.registry.release(h);
-        *phConnect = 0;
-        return fail(openads::AE_SAP_PERMS_NEED_IMPORT,
-            "This is a SAP Advantage Data Dictionary in proprietary binary format. "
-            "OpenADS cannot open it directly. "
-            "Run: import_dd <source.add> <dest.add>  "
-            "to convert it to OpenADS format, then connect to the converted file.");
-    }
+    // Return a non-fatal warning when the DD has SAP-written ACL permissions
+    // that must be imported before OpenADS can enforce them.  The connection
+    // handle IS valid; callers should disconnect, run openads_import_dd, and
+    // reconnect to the imported copy.
+    if (raw->has_dd() && raw->dd()->has_sap_permissions())
+        return openads::AE_SAP_PERMS_NEED_IMPORT;
     return ok();
 }
 
@@ -3470,7 +3451,7 @@ DbfTypeSpec dbf_type_for(const std::string& name) {
     // ── ADT-specific type names: use sentinel chars handled by adt_spec_for ──
     if (eq("CICHARACTER") || eq("CiCharacter") || eq("CICHAR"))
         return {'W', 0, 0, false};    // ADT type 20: case-insensitive char
-    if (eq("ShortInt") || eq("SmallInt") || eq("SMALLINT"))
+    if (eq("ShortInt"))
         return {'S', 2, 0, false};    // ADT type 12: 2-byte int16
     if (eq("Money") || eq("Currency"))
         return {'$', 8, 0, false};    // ADT type 18: 8-byte int64 * 10000
@@ -3517,10 +3498,7 @@ std::vector<FieldOut> parse_rddads_field_defs(const std::string& defs) {
             DbfTypeSpec ts = dbf_type_for(parts[1]);
             FieldOut f;
             f.name = parts[0];
-            // Each write path enforces its own limit:
-            //   DBF: std::min(name.size(), 10) at the header-write site
-            //   ADT: std::min(name.size(), 127u) at the field-descriptor site
-            if (f.name.size() > 128) f.name.resize(128);
+            if (f.name.size() > 10) f.name.resize(10);
             f.type = ts.type;
             f.length = ts.length;
             f.dec    = ts.dec;
@@ -4641,22 +4619,6 @@ UNSIGNED32 AdsGetLong(ADSHANDLE hTable, UNSIGNED8* pucField, SIGNED32* plVal) {
         catch (...) { *plVal = 0; }
         return ok();
     }
-    // SQL backend (e.g. postgresql): read text via the per-backend ops
-    // vtable then parse. Mirrors the AdsGetDouble fix — without it a PG
-    // handle fell through to the native get_table() path and errored.
-    if (auto* ops = openads::abi::backend_table_ops_for(hTable)) {
-        if (ops->get_field) {
-            UNSIGNED8 buf[64] = {0};
-            UNSIGNED32 cap = sizeof(buf);
-            UNSIGNED32 rc = ops->get_field(hTable, pucField, buf, &cap, 0);
-            if (rc != 0) return rc;
-            std::string vstr(reinterpret_cast<const char*>(buf),
-                             std::min<UNSIGNED32>(cap, sizeof(buf)));
-            try { *plVal = static_cast<SIGNED32>(std::stol(vstr)); }
-            catch (...) { *plVal = 0; }
-            return ok();
-        }
-    }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "");
     std::uint16_t idx = 0;
@@ -4692,23 +4654,6 @@ UNSIGNED32 AdsGetDouble(ADSHANDLE hTable, UNSIGNED8* pucField, double* pdVal) {
         try { *pdVal = std::stod(vstr); }
         catch (...) { *pdVal = 0.0; }
         return ok();
-    }
-    // SQL backend (e.g. postgresql): read the field as text through the
-    // per-backend ops vtable, then parse the numeric. Without this branch a
-    // PG handle fell through to the native get_table() path below, which
-    // returns null for a non-native table -> AdsGetDouble yielded an error.
-    if (auto* ops = openads::abi::backend_table_ops_for(hTable)) {
-        if (ops->get_field) {
-            UNSIGNED8 buf[64] = {0};
-            UNSIGNED32 cap = sizeof(buf);
-            UNSIGNED32 rc = ops->get_field(hTable, pucField, buf, &cap, 0);
-            if (rc != 0) return rc;
-            std::string vstr(reinterpret_cast<const char*>(buf),
-                             std::min<UNSIGNED32>(cap, sizeof(buf)));
-            try { *pdVal = std::stod(vstr); }
-            catch (...) { *pdVal = 0.0; }
-            return ok();
-        }
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "");
@@ -5915,18 +5860,8 @@ UNSIGNED32 AdsGetMemoDataType(ADSHANDLE hTable, UNSIGNED8* pucField,
 UNSIGNED32 AdsGetString(ADSHANDLE hTable, UNSIGNED8* pucField,
                         UNSIGNED8* pucBuf, UNSIGNED32* pulLen,
                         UNSIGNED16 usOption) {
-    // Remote cursor OR a SQL backend (e.g. postgresql) that exposes a
-    // get_field op: delegate through AdsGetField (which already routes the
-    // remote row cache and the per-backend ops vtable) then apply the
-    // ADS_TRIM trailing-space behaviour AdsGetString promises. Without this
-    // a backend handle fell through to the native get_table path below and
-    // AdsGetString returned an error / empty string for SQL backends.
-    bool delegate = (get_remote_table(hTable) != nullptr);
-    if (!delegate) {
-        if (auto* ops = openads::abi::backend_table_ops_for(hTable))
-            delegate = (ops->get_field != nullptr);
-    }
-    if (delegate) {
+    // Remote cursor: delegate through AdsGetField which reads from the row cache.
+    if (get_remote_table(hTable) != nullptr) {
         UNSIGNED32 raw_len = (pulLen && *pulLen > 0) ? *pulLen : 65536;
         std::vector<UNSIGNED8> tmp(raw_len + 1, 0);
         if (AdsGetField(hTable, pucField, tmp.data(), &raw_len, usOption) != 0)
@@ -6396,23 +6331,6 @@ void mark_cdx_key_encoding(Table* t, openads::drivers::IIndex* idx) {
     }
 }
 
-// Re-mark a reopened NTX index NtxNumeric so a later append writes the native
-// zero-padded numeric key. The create path marks it via set_numeric_format; a
-// reopen through AdsOpenIndex must restore the flag (open() already reads the
-// width + decimal count back from the NTX header). No-op for character keys.
-void mark_ntx_key_encoding(Table* t, openads::drivers::IIndex* idx) {
-    if (t == nullptr || idx == nullptr) return;
-    const std::string bare =
-        openads::engine::strip_alias_qualifiers(idx->expression());
-    std::int32_t fi = t->field_index(bare);
-    if (fi < 0) return;
-    using FT = openads::drivers::DbfFieldType;
-    FT ft = t->field_descriptor(static_cast<std::uint16_t>(fi)).type;
-    if (ft == FT::Numeric || ft == FT::Float) {
-        idx->set_key_encoding(openads::drivers::KeyEncoding::NtxNumeric);
-    }
-}
-
 bool path_ends_with_ci(const std::string& s, const char* suffix) {
     auto n = std::strlen(suffix);
     if (s.size() < n) return false;
@@ -6604,8 +6522,6 @@ UNSIGNED32 AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
             return fail(r.error());
         }
         std::string tag_name = idx->name();
-        if (path_ends_with_ci(path, ".ntx"))
-            mark_ntx_key_encoding(t, idx.get());
         ADSHANDLE h = next_index_handle();
         if (!table_has_active) {
             t->set_order(std::move(idx));
@@ -6887,28 +6803,19 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
     bool is_cdx = path_ends_with_ci(p.string(), ".cdx");
     bool is_adi = path_ends_with_ci(p.string(), ".adi");
 
-    // ACE AdsCreateIndex* option bits. include/openads/ace.h carries the
-    // SDK-standard values (ADS_UNIQUE 0x01, ADS_COMPOUND 0x02, ADS_CUSTOM
-    // 0x04, ADS_DESCENDING 0x08) — but the two RDD clients we interop with
-    // put the "compound" and "descending" flags on SWAPPED bits, measured
-    // by instrumenting this function:
-    //
-    //   client          ascending tag   descending tag
-    //   X#  ADSRDD       0x02            0x0A   (compound 0x02 | descending 0x08)
-    //   Harbour rddads   0x08            0x0A   (compound 0x08 | descending 0x02)
-    //
-    // Each client always sets ITS compound bit on EVERY tag (cdx and ntx),
-    // and adds the OTHER bit of the {0x02,0x08} pair to mean descending. So a
-    // lone 0x02 OR a lone 0x08 is ascending (it is just that client's
-    // "compound" marker), and "descending" is the one case where BOTH bits
-    // are set (0x0A). Reading a lone 0x08 (or 0x02) as descending built every
-    // Harbour (resp. X#) order reversed — AdsGotoTop landing on the last key,
-    // SKIP walking backward. The internal SQL CREATE INDEX path (below) emits
-    // 0x0A for a descending tag so it round-trips through this same decode.
-    const bool opt_compound_bit   = (ulOptions & ADS_COMPOUND) != 0;   // 0x02
-    const bool opt_descending_bit = (ulOptions & ADS_DESCENDING) != 0; // 0x08
+    // ACE AdsCreateIndex* option bits (include/openads/ace.h, values
+    // verified against the rddads contrib):
+    //   ADS_UNIQUE 0x01  ADS_COMPOUND 0x02  ADS_CUSTOM 0x04
+    //   ADS_DESCENDING 0x08
+    // ADS_COMPOUND (0x02) is redundant here (compound-ness comes from
+    // the .cdx extension) and MUST be ignored for direction — rddads
+    // and X#'s ADSRDD set it for EVERY CDX/NTX tag. `INDEX ON f TAG t`
+    // sends 0x02 alone; reading 0x02 as "descending" builds every
+    // order reversed (AdsGotoTop on the last key, SKIP walking
+    // backward). Direction comes ONLY from ADS_DESCENDING (0x08), which
+    // rddads adds for `... DESCENDING`.
     bool unique  = (ulOptions & ADS_UNIQUE) != 0;
-    bool descend = opt_compound_bit && opt_descending_bit;
+    bool descend = (ulOptions & ADS_DESCENDING) != 0;
 
     // Validate the key expression: a bare identifier that is not a column
     // is a bug in the caller's PRG (typo / renamed field). Native
@@ -6955,65 +6862,28 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
         }
     }
 
-    // NTX numeric keys: a native xBase NTX stores a numeric field's key as
-    // fixed-width, right-justified ASCII = STR(value, fieldLen, fieldDec),
-    // and records the decimal count in the index header. The key stays
-    // TEXT (unlike the compound-index 8-byte binary form), but the width
-    // and decimals MUST come from the field descriptor, not from a probed
-    // key length (which is wrong/empty on an empty table). Detect a bare
-    // ASCII-stored numeric field (N / F) so the index width is pinned to
-    // the field length and the decimals land in the header. VFP binary
-    // numerics (I/B/Y) are not ASCII on disk — left for a follow-up.
-    bool          ntx_numeric_key  = false;
-    std::uint16_t ntx_num_width     = 0;
-    std::uint16_t ntx_num_dec       = 0;
-    if (!is_cdx && !is_adi) {
-        const std::string bare = openads::engine::strip_alias_qualifiers(expr);
-        std::int32_t fi = t->field_index(bare);
-        if (fi >= 0) {
-            using FT = openads::drivers::DbfFieldType;
-            const auto& fd =
-                t->field_descriptor(static_cast<std::uint16_t>(fi));
-            if ((fd.type == FT::Numeric || fd.type == FT::Float) &&
-                fd.length > 0) {
-                ntx_numeric_key = true;
-                ntx_num_width   = fd.length;
-                ntx_num_dec     = static_cast<std::uint16_t>(fd.decimals);
-            }
-        }
-    }
-
-    // Determine the on-disk key length. Numeric CDX keys use the 8-byte
-    // binary width; numeric NTX keys use the field's own width so the key
-    // matches the native reader.
-    std::uint16_t klen = cdx_numeric_key ? 8
-                       : ntx_numeric_key ? ntx_num_width
-                       : 0;
-    if (!cdx_numeric_key && !ntx_numeric_key) {
-        // A character key is fixed-width on disk. For a bare character field
-        // the width is the declared field length; deriving it from the
-        // *trimmed* value of the first record truncates every later key that
-        // shares a prefix beyond that width (a short first row collapses
-        // longer rows onto the same key), corrupting ordering and seeks in
-        // both the index itself and native FoxPro/Clipper readers. Prefer the
-        // field width; fall back to the untrimmed first-record key width for a
-        // composite expression; keep the 32-char default only for an empty
-        // table with nothing to probe.
-        const std::string bare = openads::engine::strip_alias_qualifiers(expr);
-        std::int32_t fi = t->field_index(bare);
-        if (fi >= 0) {
-            klen = t->field_descriptor(static_cast<std::uint16_t>(fi)).length;
-        } else if (t->record_count() > 0) {
-            if (auto g = t->goto_record(1); g) {
-                if (auto k = openads::engine::evaluate_index_expr(*t, expr, 254)) {
-                    std::size_t n = std::move(k).value().size();  // untrimmed
-                    if (n > 0)
-                        klen = static_cast<std::uint16_t>(
-                            std::min<std::size_t>(n, 254));
+    // Determine key length from the expression's natural FIXED-WIDTH length,
+    // evaluated against the first live record. key_len=0 makes
+    // evaluate_index_expr return the un-padded result, reading fields at their
+    // declared width. Do NOT rtrim: a fixed-width field's trailing blanks are
+    // part of the key. The old code rtrimmed here, pinning key_size to the
+    // first record's *content* length, so any longer key (e.g. a longer
+    // UPPER(name)) got truncated, its distinguishing tail dropped; the bulk
+    // sort then tie-broke by recno, leaving keys ordered but their recnos
+    // scrambled and the browse showing rows out of order. Empty tables / empty
+    // result keep the 32-char default.
+    std::uint16_t klen = cdx_numeric_key ? 8 : 32;
+    if (!cdx_numeric_key && t->record_count() > 0) {
+        if (auto g = t->goto_record(1); g) {
+            auto k = openads::engine::evaluate_index_expr(*t, expr, 0);
+            if (k) {
+                std::size_t natlen = k.value().size();
+                if (natlen > 0) {
+                    klen = static_cast<std::uint16_t>(
+                        std::min<std::size_t>(natlen, 254));
                 }
             }
         }
-        if (klen == 0) klen = 32;
     }
 
     std::unique_ptr<openads::drivers::IIndex> idx_owner;
@@ -7137,19 +7007,8 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
         auto created = openads::drivers::ntx::NtxIndex::create(
             p.string(), tag, expr, klen, unique, descend);
         if (!created) return fail(created.error());
-        auto ntx_owner = std::make_unique<openads::drivers::ntx::NtxIndex>(
+        idx_owner = std::make_unique<openads::drivers::ntx::NtxIndex>(
             std::move(created).value());
-        // Pin the key geometry to the numeric field descriptor so the
-        // on-disk key is the native fixed-width STR(value,width,dec) form
-        // (and the header carries the decimal count) — independent of any
-        // probed key length, which is absent on an empty table.
-        if (ntx_numeric_key) {
-            if (auto sf = ntx_owner->set_numeric_format(
-                    ntx_num_width, ntx_num_dec); !sf) {
-                return fail(sf.error());
-            }
-        }
-        idx_owner = std::move(ntx_owner);
     }
     // Mark a numeric CDX index FoxNumeric so every key-build path (this
     // create loop, the engine's sync_all_indexes_, seek) emits the 8-byte
@@ -7169,7 +7028,7 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
     std::vector<std::pair<std::string, std::uint32_t>> bulk_keys;
     if (cdx_bulk) bulk_keys.reserve(rec_count);
     for (std::uint32_t r = 1; r <= rec_count; ++r) {
-        if (auto g = t->goto_record(r); !g) return fail(g.error());
+        if (auto g = t->goto_record_for_build(r); !g) return fail(g.error());
         // DBFCDX inserts deleted rows too — the index is a logical
         // mirror of the table, not a "live-only" view. SET DELETED
         // hides them at navigation time. Only the FOR clause filters
@@ -7185,13 +7044,6 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
                 return fail(openads::AE_INTERNAL_ERROR,
                             "failed to evaluate numeric index expression");
             kbytes = openads::engine::fox_numeric_key(dv);
-        } else if (ntx_numeric_key) {
-            double dv = 0.0;
-            if (!openads::engine::evaluate_index_expr_number(*t, expr, dv))
-                return fail(openads::AE_INTERNAL_ERROR,
-                            "failed to evaluate numeric index expression");
-            kbytes = openads::engine::ntx_numeric_key(dv, ntx_num_width,
-                                                      ntx_num_dec);
         } else {
             auto k = openads::engine::evaluate_index_expr(*t, expr, klen);
             if (!k) return fail(k.error());
@@ -7273,7 +7125,7 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
                     std::vector<std::pair<std::string, std::uint32_t>> sib_keys;
                     sib_keys.reserve(rec_count);
                     for (std::uint32_t r2 = 1; r2 <= rec_count; ++r2) {
-                        if (auto g = t->goto_record(r2); !g) continue;
+                        if (auto g = t->goto_record_for_build(r2); !g) continue;
                         std::string k2b;
                         if (sib_fox) {
                             double dv = 0.0;
@@ -7352,7 +7204,7 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
 
 UNSIGNED32 AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
                           UNSIGNED8* pucTag, UNSIGNED8* pucExpr,
-                          UNSIGNED8* /*pucCondition*/, UNSIGNED32 /*ulOptions*/,
+                          UNSIGNED8* pucCondition, UNSIGNED32 /*ulOptions*/,
                           UNSIGNED16 /*usKeyType*/, ADSHANDLE* phIndex) {
     Table* t = get_table(hTable);
     if (!t || phIndex == nullptr) {
@@ -7361,6 +7213,14 @@ UNSIGNED32 AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
     auto file = openads::abi::to_internal(pucFile, 0);
     auto tag  = openads::abi::to_internal(pucTag,  0);
     auto expr = openads::abi::to_internal(pucExpr, 0);
+    // A FOR condition makes this a conditional index: only matching rows get
+    // a key entry (mirrors AdsCreateIndex61's build loop). Ignoring pucCondition
+    // built a full index over every row, so AdsGetKeyCount, OrdKeyNo, SKIP and
+    // EOF all reflected ALL records instead of the matching subset — TXBrowse
+    // position math desynced on conditional ("temporary search") orders.
+    std::string for_expr = pucCondition != nullptr
+        ? openads::abi::to_internal(pucCondition, 0)
+        : std::string{};
 
     // Resolve the field referenced by the expression to determine key length.
     std::int32_t fidx = t->field_index(expr);
@@ -7398,8 +7258,12 @@ UNSIGNED32 AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
     std::vector<std::pair<std::string, std::uint32_t>> bulk_keys;
     if (cdx_bulk) bulk_keys.reserve(rec_count);
     for (std::uint32_t r = 1; r <= rec_count; ++r) {
-        if (auto rr = t->goto_record(r); !rr) return fail(rr.error());
+        if (auto rr = t->goto_record_for_build(r); !rr) return fail(rr.error());
         if (t->is_deleted()) continue;
+        // FOR clause filters entries out at build time (DBFCDX semantics).
+        if (!for_expr.empty() &&
+            !openads::engine::evaluate_index_expr_truthy(*t, for_expr))
+            continue;
         auto v = t->read_field(static_cast<std::uint16_t>(fidx));
         if (!v) return fail(v.error());
         std::string padded = v.value().as_string;
@@ -7490,15 +7354,6 @@ UNSIGNED32 AdsAddCustomKey(ADSHANDLE hIndex) {
             return fail(openads::AE_INTERNAL_ERROR,
                         "failed to evaluate numeric index expression");
         kb = openads::engine::fox_numeric_key(dv);
-    } else if (idx->key_encoding() ==
-               openads::drivers::KeyEncoding::NtxNumeric) {
-        double dv = 0.0;
-        if (!openads::engine::evaluate_index_expr_number(
-                *t, idx->expression(), dv))
-            return fail(openads::AE_INTERNAL_ERROR,
-                        "failed to evaluate numeric index expression");
-        kb = openads::engine::ntx_numeric_key(dv, idx->key_length(),
-                                              idx->key_decimals());
     } else {
         auto k = openads::engine::evaluate_index_expr(*t, idx->expression(), klen);
         if (!k) return fail(k.error());
@@ -7532,15 +7387,6 @@ UNSIGNED32 AdsDeleteCustomKey(ADSHANDLE hIndex) {
             return fail(openads::AE_INTERNAL_ERROR,
                         "failed to evaluate numeric index expression");
         kb = openads::engine::fox_numeric_key(dv);
-    } else if (idx->key_encoding() ==
-               openads::drivers::KeyEncoding::NtxNumeric) {
-        double dv = 0.0;
-        if (!openads::engine::evaluate_index_expr_number(
-                *t, idx->expression(), dv))
-            return fail(openads::AE_INTERNAL_ERROR,
-                        "failed to evaluate numeric index expression");
-        kb = openads::engine::ntx_numeric_key(dv, idx->key_length(),
-                                              idx->key_decimals());
     } else {
         auto k = openads::engine::evaluate_index_expr(*t, idx->expression(), klen);
         if (!k) return fail(k.error());
@@ -7618,27 +7464,8 @@ extern "C" {
 
 UNSIGNED32 AdsGetLongLong(ADSHANDLE hTable, UNSIGNED8* pucField,
                           std::int64_t* pllValue) {
-    if (pllValue == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
-    // SQL backend (e.g. postgresql): read text via the per-backend ops
-    // vtable then parse, instead of falling through to the native path.
-    if (auto* ops = openads::abi::backend_table_ops_for(hTable)) {
-        if (ops->get_field) {
-            UNSIGNED8 buf[64] = {0};
-            UNSIGNED32 cap = sizeof(buf);
-            UNSIGNED32 rc = ops->get_field(hTable, pucField, buf, &cap, 0);
-            if (rc != 0) return rc;
-            std::string s(reinterpret_cast<const char*>(buf),
-                          std::min<UNSIGNED32>(cap, sizeof(buf)));
-            std::size_t j = 0;
-            while (j < s.size() &&
-                   std::isspace(static_cast<unsigned char>(s[j]))) ++j;
-            *pllValue = static_cast<std::int64_t>(
-                std::strtoll(s.c_str() + j, nullptr, 10));
-            return ok();
-        }
-    }
     Table* t = get_table(hTable);
-    if (!t) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (!t || pllValue == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     std::uint16_t idx = 0;
     if (!resolve_field_index(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
@@ -9208,7 +9035,8 @@ UNSIGNED32 AdsGetNumIndexes(ADSHANDLE hTable, UNSIGNED16* pusCount) {
 
 UNSIGNED32 AdsGetIndexHandle(ADSHANDLE hTable, UNSIGNED8* pucName,
                              ADSHANDLE* phIndex) {
-    if (phIndex == nullptr) {
+    Table* t = get_table(hTable);
+    if (!t || phIndex == nullptr) {
         return fail(openads::AE_INTERNAL_ERROR, "");
     }
     auto name = openads::abi::to_internal(pucName, 0);
@@ -9216,32 +9044,6 @@ UNSIGNED32 AdsGetIndexHandle(ADSHANDLE hTable, UNSIGNED8* pucName,
     // up to ADS_MAX_TAG_NAME before passing them to us).
     while (!name.empty() && (name.back() == ' ' || name.back() == '\0')) {
         name.pop_back();
-    }
-#if defined(OPENADS_WITH_POSTGRESQL)
-    // SQL backend (postgresql): resolve an already-open PG index by its
-    // tag/column name. AdsOpenIndex creates the PostgresIndex handle; this
-    // is the by-name lookup path the ORM uses after opening. A PG handle has
-    // no native Table*, so without this branch the function fell through to
-    // get_table() below and errored for every PG table. Match the tag the
-    // way postgres_open_index derives it (strip path + extension).
-    if (auto* st = get_postgres_table(hTable)) {
-        std::string tag = name;
-        const auto dot = tag.find_last_of("./\\");
-        if (dot != std::string::npos) tag = tag.substr(dot + 1);
-        const auto dot2 = tag.find('.');
-        if (dot2 != std::string::npos) tag = tag.substr(0, dot2);
-        for (auto& [h, si] : postgres_indexes_map()) {
-            if (si && si->parent == st && si->column == tag) {
-                *phIndex = h;
-                return ok();
-            }
-        }
-        return fail(openads::AE_INTERNAL_ERROR, "index name not found");
-    }
-#endif
-    Table* t = get_table(hTable);
-    if (!t) {
-        return fail(openads::AE_INTERNAL_ERROR, "");
     }
     for (auto& [h, b] : index_bindings()) {
         if (b.table == t && b.tag_name == name) { *phIndex = h; return ok(); }
@@ -9570,23 +9372,12 @@ UNSIGNED32 AdsSeek(ADSHANDLE hIndex,
         dk_idx != nullptr &&
         dk_idx->key_encoding() == openads::drivers::KeyEncoding::FoxNumeric &&
         u16KeyLen == sizeof(double);
-    const bool dk_ntxnum =
-        dk_idx != nullptr &&
-        dk_idx->key_encoding() == openads::drivers::KeyEncoding::NtxNumeric &&
-        u16KeyLen == sizeof(double);
     if (dk_foxnum) {
         // Numeric CDX key: encode the seek value the same 8-byte
         // order-preserving way the stored keys were written.
         double dv = 0;
         std::memcpy(&dv, pucKey, sizeof(double));
         key = openads::engine::fox_numeric_key(dv);
-    } else if (dk_ntxnum) {
-        // Numeric NTX key: encode the seek value the same native zero-padded
-        // (negatives byte-complemented) way the stored keys were written.
-        double dv = 0;
-        std::memcpy(&dv, pucKey, sizeof(double));
-        key = openads::engine::ntx_numeric_key(dv, dk_idx->key_length(),
-                                               dk_idx->key_decimals());
     } else if (dk_idx != nullptr && dk_numeric && u16KeyLen == sizeof(double)) {
         double dv = 0;
         std::memcpy(&dv, pucKey, sizeof(double));
@@ -10095,13 +9886,23 @@ UNSIGNED32 AdsSetAOF(ADSHANDLE hTable, UNSIGNED8* pucCondition,
     auto cond = openads::abi::to_internal(pucCondition, 0);
     auto ast = openads::engine::aof::parse(cond);
     if (!ast) {
-        // An expression outside the optimisable AOF subset (e.g.
-        // `Empty(NAME)`, `UPPER(NAME) = 'A'`) is not an error — ADS
-        // just declines to optimise it and the client RDD applies the
-        // filter itself. Drop any prior AOF, report OPTIMIZED_NONE,
-        // and succeed so the caller's own row filter takes over.
+        // Expression outside OpenADS' optimisable AOF subset — a function
+        // call (Empty/UPPER...) or, crucially, a key compared against a
+        // HOST VARIABLE the engine cannot see (`cCodigoArt >= cArtIni`,
+        // where cArtIni is a Harbour memvar). We cannot build a server-side
+        // filter for it, so we MUST NOT report success: Harbour's rddads
+        // adsSetFilter decides whether to run its own client-side row
+        // filter purely from AdsSetAOF's return code (it does NOT consult
+        // AdsGetAOFOptLevel). On AE_SUCCESS it assumes the server optimised
+        // the filter and skips the client-side pass — which made SET FILTER
+        // silently inert (the whole table printed). Returning a non-SUCCESS
+        // code makes the RDD fall back to its client-side filter; that works
+        // because AdsGetField already returns fixed-width field values, so
+        // the Harbour filter codeblock compares correctly. This also mirrors
+        // real ADS, which errors when an AOF cannot be built.
         t->clear_filter();
-        return ok();
+        return fail(openads::AE_INVALID_EXPRESSION,
+                    "AOF expression not optimisable; client filters");
     }
     // Route through the M-AOF.4 index-accelerated evaluator: every
     // leaf that hits an open CDX/NTX index whose key expression is
@@ -12511,7 +12312,7 @@ UNSIGNED32 AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
             ADSHANDLE hTable = 0;
             UNSIGNED32 rc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
-                                           ADS_ADT, 0, 0, 0, 0,
+                                           ADS_CDX, 0, 0, 0, 0,
                                            def_buf.data(), &hTable);
             if (rc != openads::AE_SUCCESS) {
                 AdsCloseTable(srcCur);
@@ -12610,7 +12411,7 @@ UNSIGNED32 AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         });
         if (conn_h == 0) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
         UNSIGNED32 rc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
-                                       ADS_ADT, 0, 0, 0, 0,
+                                       ADS_CDX, 0, 0, 0, 0,
                                        def_buf.data(), &hTable);
         if (rc != openads::AE_SUCCESS) return rc;
         // Close the table immediately; CREATE TABLE returns no cursor.
@@ -12641,14 +12442,15 @@ UNSIGNED32 AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             return rc;
         }
 
-        // CREATE INDEX writes a structural .adi sidecar named after
-        // the table's stem so AdsOpenTable auto-attaches it next open.
+        // CREATE INDEX writes a structural .cdx sidecar named after
+        // the table's stem so subsequent ADS_CDX opens auto-attach
+        // (and so multi-tag CREATE INDEX accumulates into one bag).
         namespace fs = std::filesystem;
         fs::path tbl_path(c->data_dir());
         tbl_path /= ci.value().table;
-        if (!tbl_path.has_extension()) tbl_path.replace_extension(".adt");
+        if (!tbl_path.has_extension()) tbl_path.replace_extension(".dbf");
         fs::path bag = tbl_path;
-        bag.replace_extension(".adi");
+        bag.replace_extension(".cdx");
 
         std::vector<UNSIGNED8> bag_buf(bag.string().size() + 1, 0);
         std::memcpy(bag_buf.data(), bag.string().data(),
@@ -12660,13 +12462,12 @@ UNSIGNED32 AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         std::memcpy(expr_buf.data(), ci.value().expression.data(),
                     ci.value().expression.size());
         UNSIGNED32 opts = 0;
-        // Re-encode for AdsCreateIndex61's decode. That decode treats a
-        // .cdx (compound) tag as descending only when BOTH the compound and
-        // descending bits are set (the two RDD clients disagree on which bit
-        // is which — see the decode comment there), so a descending index
-        // must carry ADS_COMPOUND | ADS_DESCENDING (0x0A), not 0x08 alone.
+        // Re-encode using the named ACE option bits so this round-trips
+        // through AdsCreateIndex61's `& ADS_DESCENDING` decode. Hardcoded
+        // literals here would silently lose the direction if the bit
+        // values are ever revisited.
         if (ci.value().unique)     opts |= ADS_UNIQUE;
-        if (ci.value().descending) opts |= (ADS_COMPOUND | ADS_DESCENDING);
+        if (ci.value().descending) opts |= ADS_DESCENDING;
         ADSHANDLE hIdx = 0;
         UNSIGNED32 rc = AdsCreateIndex61(
             hTable, bag_buf.data(), tag_buf.data(),
@@ -12703,32 +12504,15 @@ UNSIGNED32 AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (c->has_dd()) {
             auto* dd = c->dd();
             const auto& g = gs.value();
-            // Map right name → bitmask.  Grants accumulate (OR into existing).
-            using DD = openads::engine::DataDict;
-            uint32_t new_bits = 0;
             std::string r = g.right;
-            for (auto& ch : r)
-                ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-            if      (r == "ALL")       new_bits = DD::DD_PERM_FULL;
-            else if (r == "SELECT")    new_bits = DD::DD_PERM_SELECT;
-            else if (r == "INSERT")    new_bits = DD::DD_PERM_INSERT;
-            else if (r == "UPDATE")    new_bits = DD::DD_PERM_UPDATE;
-            else if (r == "DELETE")    new_bits = DD::DD_PERM_DELETE;
-            else if (r == "EXECUTE")   new_bits = DD::DD_PERM_EXECUTE;
-            else if (r == "REFERENCE" || r == "REFERENCES")
-                                       new_bits = DD::DD_PERM_REFERENCE;
-            else                       new_bits = DD::DD_PERM_FULL;  // unknown → full
-            // Determine object type from the DD.
-            std::string obj_type = "Table";
-            if (dd->has_proc(g.object))     obj_type = "StoredProc";
-            else if (dd->has_function(g.object)) obj_type = "Function";
-            else if (dd->has_view(g.object))     obj_type = "View";
-            // Accumulate with existing grant for same grantee+object.
-            uint32_t cur_bits = 0;
-            for (const auto& pe : dd->permissions())
-                if (pe.object_name == g.object && pe.grantee == g.principal)
-                    cur_bits |= pe.bitmask;
-            dd->grant_permission(obj_type, g.object, g.principal, cur_bits | new_bits);
+            int level = 4;
+            if      (r == "SELECT")                   level = 1;
+            else if (r == "INSERT" || r == "UPDATE")  level = 2;
+            else if (r == "DELETE")                   level = 3;
+            // Take max of current and requested (grants accumulate)
+            int cur = dd->has_table_acl(g.object)
+                ? dd->get_effective_permission(g.principal, g.object) : 0;
+            dd->set_table_permission(g.object, g.principal, std::max(cur, level));
         }
         *phCursor = 0;
         return ok();
@@ -12741,27 +12525,16 @@ UNSIGNED32 AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (c->has_dd()) {
             auto* dd = c->dd();
             const auto& g = gs.value();
-            using DD = openads::engine::DataDict;
-            uint32_t revoke_bits = DD::DD_PERM_FULL;
-            std::string r = g.right;
-            for (auto& ch : r)
-                ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-            if      (r == "SELECT")    revoke_bits = DD::DD_PERM_SELECT;
-            else if (r == "INSERT")    revoke_bits = DD::DD_PERM_INSERT;
-            else if (r == "UPDATE")    revoke_bits = DD::DD_PERM_UPDATE;
-            else if (r == "DELETE")    revoke_bits = DD::DD_PERM_DELETE;
-            else if (r == "EXECUTE")   revoke_bits = DD::DD_PERM_EXECUTE;
-            // Compute new bitmask = current & ~revoke_bits.
-            uint32_t cur_bits = 0;
-            std::string obj_type = "Table";
-            for (const auto& pe : dd->permissions()) {
-                if (pe.object_name == g.object && pe.grantee == g.principal) {
-                    cur_bits |= pe.bitmask;
-                    obj_type  = pe.object_type;
-                }
+            int level = 0;
+            if (g.right != "ALL") {
+                std::string r = g.right;
+                int rl = 4;
+                if      (r == "SELECT")                  rl = 1;
+                else if (r == "INSERT" || r == "UPDATE") rl = 2;
+                else if (r == "DELETE")                  rl = 3;
+                level = (rl > 0) ? rl - 1 : 0;
             }
-            dd->grant_permission(obj_type, g.object, g.principal,
-                                  cur_bits & ~revoke_bits);
+            dd->set_table_permission(g.object, g.principal, level);
         }
         *phCursor = 0;
         return ok();
@@ -13611,8 +13384,8 @@ UNSIGNED32 AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     // ADS dialect — N-way comma join (3+ tables) with composite keys and
     // `<alias>.*` projection. The single-JoinClause path below handles only
     // two tables; this path generalises to the multi-table inventory
-    // aggregation the application issues (a header/detail join with
-    // dimension tables). It runs a left-deep equi-join in FROM order and writes the
+    // aggregation the ERP issues (concepto/conseinv/moviminv/clientes/
+    // articulo). It runs a left-deep equi-join in FROM order and writes the
     // projected columns — named by their UNQUALIFIED column name, the ADS
     // result semantics — into a temp DBF cursor.
     //
@@ -13710,7 +13483,7 @@ UNSIGNED32 AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         std::vector<std::vector<const openads::sql::WhereExpr*>> buckets(N);
         // Residual conjuncts that reference ONLY one joined table (index >= 1)
         // are applied while BUILDING that table's hash, so the hash holds just
-        // the matching rows (e.g. only the month's detail rows) instead of the
+        // the matching rows (e.g. only the month's moviminv) instead of the
         // whole history. Indexed by table.
         std::vector<std::vector<const openads::sql::WhereExpr*>> pure(N);
         bool spine_ok = true;
@@ -14012,7 +13785,7 @@ UNSIGNED32 AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
 
         // --- 7b. Hash each joined table on its key columns, applying the
         //         single-table residual filters (pure[i]) up front so the hash
-        //         holds only matching rows (e.g. just the month's detail rows)
+        //         holds only matching rows (e.g. just the month's moviminv)
         //         instead of the whole history. raws[i] is scratch here; the
         //         walk re-binds it per emitted combination.
         for (std::size_t i = 1; i < N; ++i) {
@@ -17644,6 +17417,113 @@ UNSIGNED32 AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return ok();
     }
 
+    // ADS static-cursor semantics — single-table SELECT with ORDER BY /
+    // DISTINCT / LIMIT must be a STANDALONE temp table, not the live source
+    // with a recno_sequence. Real ACE returns a static cursor (its own temp
+    // table) for these; the ERP then runs `INDEX ON ... ; DBSETORDER(n)` on
+    // the result. If the cursor were the live `<source>.dbf`, those index ops
+    // would hit the production table and REWRITE its official .cdx (the user
+    // saw "cualquier SELECT-SQL reescribio los indices originales"), and a
+    // recno_sequence over the live table makes DBSETORDER a no-op for the
+    // browse. Materialising the result into a clean temp DBF (its own recnos
+    // 1..N, its own index space) isolates it from the source: INDEX ON /
+    // DBSETORDER behave exactly like DBFCDX / ADS_CDX. Same shape the
+    // multi-table / union / aggregate / CASE paths already produce.
+    if (derived_cur == 0 && tbl->has_recno_sequence()) {
+        ADSHANDLE conn_h = 0;
+        s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
+            if (k != HandleKind::Connection) return;
+            if (static_cast<Connection*>(p) == c) conn_h = h;
+        });
+        if (conn_h != 0) {
+            std::vector<std::uint16_t> cols;
+            bool col_err = false;
+            if (parsed.value().projection.empty()) {
+                std::uint16_t nf = tbl->field_count();
+                cols.reserve(nf);
+                for (std::uint16_t k = 0; k < nf; ++k) cols.push_back(k);
+            } else {
+                cols.reserve(parsed.value().projection.size());
+                for (const auto& cn : parsed.value().projection) {
+                    std::int32_t fi = tbl->field_index(cn);
+                    if (fi < 0) { col_err = true; break; }
+                    cols.push_back(static_cast<std::uint16_t>(fi));
+                }
+            }
+            if (col_err) return fail(openads::AE_COLUMN_NOT_FOUND, "");
+            auto type_name = [](char raw) -> const char* {
+                switch (raw) {
+                    case 'C': return "Character";  case 'N': return "Numeric";
+                    case 'D': return "Date";       case 'L': return "Logical";
+                    case 'M': return "Memo";       case 'F': return "Float";
+                    case 'I': return "Integer";    case 'Y': return "Currency";
+                    case 'B': return "Double";     case 'V': return "Varchar";
+                    case 'Q': return "Varbinary";
+                }
+                return "Character";
+            };
+            std::string defs;
+            for (auto cidx : cols) {
+                const auto& fd = tbl->field_descriptor(cidx);
+                if (!defs.empty()) defs.push_back(';');
+                defs += fd.name;
+                defs.push_back(',');
+                defs += type_name(static_cast<char>(fd.raw_type));
+                if (fd.length   > 0) { defs.push_back(','); defs += std::to_string(fd.length); }
+                if (fd.decimals > 0) { defs.push_back(','); defs += std::to_string(fd.decimals); }
+            }
+            char nb[64];
+            std::snprintf(nb, sizeof(nb), "_srt_%llx",
+                          static_cast<unsigned long long>(
+                              openads::platform::monotonic_nanos()));
+            std::string tmp_name = nb;
+            std::vector<UNSIGNED8> name_buf(tmp_name.size() + 1, 0);
+            std::memcpy(name_buf.data(), tmp_name.data(), tmp_name.size());
+            std::vector<UNSIGNED8> def_buf(defs.size() + 1, 0);
+            std::memcpy(def_buf.data(), defs.data(), defs.size());
+            ADSHANDLE hNew = 0;
+            UNSIGNED32 crc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
+                                            ADS_CDX, 0, 0, 0, 0,
+                                            def_buf.data(), &hNew);
+            if (crc == openads::AE_SUCCESS) {
+                openads::engine::Table* tgt =
+                    s.registry.lookup<openads::engine::Table>(
+                        hNew, HandleKind::Table);
+                if (tgt != nullptr) {
+                    std::vector<std::uint32_t> seq = tbl->recno_sequence();
+                    for (std::uint32_t r : seq) {
+                        if (auto g = tbl->goto_record(r); !g) continue;
+                        if (auto ar = tgt->append_record(); !ar) break;
+                        for (std::size_t i = 0; i < cols.size(); ++i) {
+                            auto v = tbl->read_field(cols[i]);
+                            std::string sv =
+                                v ? v.value().as_string : std::string();
+                            (void)tgt->set_field(
+                                static_cast<std::uint16_t>(i), sv);
+                        }
+                    }
+                    (void)tgt->flush();
+                }
+                AdsCloseTable(hNew);
+                // Drop the live source cursor so the ERP's INDEX ON / close
+                // never touches the production table or its official .cdx.
+                if (table_handle != 0) c->close_table(table_handle);
+                auto cth = c->open_table(tmp_name,
+                                         openads::engine::TableType::Cdx,
+                                         openads::engine::OpenMode::Shared);
+                if (!cth) return fail(cth.error());
+                openads::engine::Table* ctbl = c->lookup_table(cth.value());
+                if (!ctbl) return fail(openads::AE_INTERNAL_ERROR,
+                                       "sorted temp post-open");
+                ADSHANDLE gh_srt =
+                    s.registry.register_object(HandleKind::Table, ctbl);
+                *phCursor = gh_srt;
+                return ok();
+            }
+            // AdsCreateTable failed -> fall through to the live-cursor return.
+        }
+    }
+
     // M10.46 — when this query was a derived-table outer SELECT,
     // reuse the inner cursor's existing handle so the user-visible
     // cursor isn't a stale alias of an already-registered Table*.
@@ -17919,6 +17799,19 @@ UNSIGNED32 AdsGetIndexOrderByHandle(ADSHANDLE hIndex, UNSIGNED16* p) {
 // AdsGetJulian already defined elsewhere in this file.
 UNSIGNED32 AdsGetKeyLength(ADSHANDLE, UNSIGNED16* p)
     { if (p) *p = 0; return openads::AE_SUCCESS; }
+// 1-based position of `rn` within an installed recno_sequence — the
+// traversal order a SQL ORDER BY / DISTINCT / LIMIT result (and an AOF
+// bitmap) pre-builds over a LIVE single-table cursor (Table::
+// set_recno_sequence). 0 when no sequence is installed or `rn` isn't in
+// it. O(1) via the engine's recno->index map, and stateless w.r.t. the
+// cursor (it does NOT rely on the table's internal sequence_idx_), so it
+// stays correct across the browse's goto-then-read round-trip.
+static std::uint32_t recno_seq_pos_1based(openads::engine::Table* t,
+                                          std::uint32_t rn) {
+    if (t == nullptr || rn == 0 || !t->has_recno_sequence()) return 0;
+    std::int64_t idx = t->recno_sequence_index(rn);
+    return idx < 0 ? 0u : static_cast<std::uint32_t>(idx + 1);
+}
 // 1-based position of the current record within the active order's key
 // sequence (== the record number when no order is active). FWH's
 // xBrowse uses this (via Harbour rddads' AdsKeyNo()) as its scrollbar
@@ -17938,6 +17831,16 @@ UNSIGNED32 AdsGetKeyNum(ADSHANDLE hObj, UNSIGNED16 /*usFilterOption*/,
     if (t == nullptr) return fail(openads::AE_INTERNAL_ERROR, "no table");
     auto* ord = t->order();
     if (ord == nullptr || ord->index() == nullptr) {
+        // No active index. A SQL ORDER BY / DISTINCT / LIMIT result installs a
+        // recno_sequence over the live cursor; the browse's logical key number
+        // is the row's 1-based position in that sequence, NOT the physical
+        // recno (those diverge for any non-trivial sort — the painted row then
+        // desyncs from the record pointer). Fall back to the recno only when
+        // no sequence is installed (true natural order).
+        if (std::uint32_t sp = recno_seq_pos_1based(t, t->recno()); sp != 0) {
+            *pulKeyNum = sp;
+            return ok();
+        }
         // natural order: key number == record number
         *pulKeyNum = t->recno();
         return ok();
@@ -18096,6 +17999,21 @@ UNSIGNED32 AdsGetRelKeyPos(ADSHANDLE h, double* p) {
     }
     Table* t = get_table(h);
     if (t == nullptr) return fail(openads::AE_INTERNAL_ERROR, "no table");
+    // A SQL ORDER BY / DISTINCT / LIMIT result (and an AOF bitmap) installs a
+    // recno_sequence over the live cursor; the xBrowse scrollbar fraction must
+    // be the row's position WITHIN that visible set, not (recno-1)/(count-1)
+    // over the full physical table (those diverge for any non-trivial sort).
+    if (t->has_recno_sequence()) {
+        const auto& seq = t->recno_sequence();
+        std::uint32_t rn_seq = t->recno();
+        if (seq.size() <= 1) { *p = 0.0; return ok(); }
+        if (rn_seq == 0) { *p = t->eof() ? 1.0 : 0.0; return ok(); }
+        std::uint32_t sp = recno_seq_pos_1based(t, rn_seq);   // 1-based
+        *p = (sp == 0) ? 0.0
+                       : static_cast<double>(sp - 1) /
+                         static_cast<double>(seq.size() - 1);
+        return ok();
+    }
     std::uint32_t rc = t->record_count();
     std::uint32_t rn = t->recno();
     if (rc <= 1) { *p = 0.0; return ok(); }
@@ -18256,6 +18174,22 @@ UNSIGNED32 AdsSetRelKeyPos(ADSHANDLE h, double pos) {
     if (rc == 0) return ok();
     if (pos < 0.0) pos = 0.0;
     if (pos > 1.0) pos = 1.0;
+
+    // recno-sequence cursor (SQL ORDER BY / DISTINCT / LIMIT, or AOF): a
+    // scrollbar drag lands at fraction `pos` through the visible set, then
+    // positions on that row's recno — the inverse of AdsGetRelKeyPos, so a
+    // Get-then-Set round-trip is stable. goto_record re-syncs sequence_idx_
+    // so the following SKIP keeps walking the sequence.
+    if (t->has_recno_sequence()) {
+        const auto& seq = t->recno_sequence();
+        if (seq.empty()) return ok();
+        std::size_t target = static_cast<std::size_t>(
+            pos * static_cast<double>(seq.size() - 1) + 0.5);
+        if (target >= seq.size()) target = seq.size() - 1;
+        auto rr = t->goto_record(seq[target]);
+        if (!rr) return fail(rr.error());
+        return ok();
+    }
 
     // Active-order path: ADS positions the cursor at fraction `pos`
     // through the *index walk*, not through raw recno space. Walk
@@ -18976,6 +18910,15 @@ UNSIGNED32 AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
                 cdx->ordered_recnos_cached().size());
             return ok();
         }
+    }
+    // No active index, but a SQL ORDER BY / DISTINCT / LIMIT result (or an AOF
+    // bitmap) installed a recno_sequence → the key count is the size of that
+    // visible set, consistent with OrdKeyNo / GetRelKeyPos (which now count the
+    // sequence) and with AdsGetRecordCount. record_count() would overstate the
+    // scrollbar range with the filtered-out rows.
+    if (t->has_recno_sequence()) {
+        *pulCount = static_cast<UNSIGNED32>(t->recno_sequence().size());
+        return ok();
     }
     *pulCount = t->record_count();
     return ok();

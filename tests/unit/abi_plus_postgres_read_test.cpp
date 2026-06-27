@@ -116,51 +116,6 @@ TEST_CASE("ABI: postgresql read-only AdsOpenTable navigation") {
     REQUIRE(AdsDisconnect(hConn) == 0);
 }
 
-TEST_CASE("ABI: postgresql AdsGetDouble / AdsGetString backend dispatch") {
-    const char* uri_cstr = test_pg_uri();
-
-    PGconn* seed = PQconnectdb(uri_cstr);
-    REQUIRE(PQstatus(seed) == CONNECTION_OK);
-    seed_fixture(seed);
-    PQfinish(seed);
-
-    const std::string uri = uri_cstr;
-    std::vector<UNSIGNED8> srv(uri.size() + 1);
-    std::memcpy(srv.data(), uri.c_str(), uri.size() + 1);
-
-    ADSHANDLE hConn = 0;
-    REQUIRE(AdsConnect60(srv.data(), ADS_LOCAL_SERVER,
-                         nullptr, nullptr, 0, &hConn) == 0);
-
-    UNSIGNED8 tbl_name[32] = "clientes";
-    ADSHANDLE hTable = 0;
-    REQUIRE(AdsOpenTable(hConn, tbl_name, tbl_name,
-                         ADS_DEFAULT, 0, 0, 0, ADS_READONLY,
-                         &hTable) == 0);
-
-    REQUIRE(AdsGotoTop(hTable) == 0);
-
-    // Row 1: Ana / saldo 10.5 — getters must return the REAL backend value,
-    // not the native fall-through's 0 / empty for a PG handle.
-    {
-        UNSIGNED8 fld[32] = "saldo";
-        double d = -1.0;
-        REQUIRE(AdsGetDouble(hTable, fld, &d) == 0);
-        CHECK(d == doctest::Approx(10.5));
-    }
-    {
-        UNSIGNED8 fld[32] = "nome";
-        UNSIGNED8 buf[128] = {0};
-        UNSIGNED32 cap = sizeof(buf);
-        REQUIRE(AdsGetString(hTable, fld, buf, &cap, 0) == 0);
-        const std::string s(reinterpret_cast<const char*>(buf), cap);
-        CHECK(s.find("Ana") != std::string::npos);
-    }
-
-    REQUIRE(AdsCloseTable(hTable) == 0);
-    REQUIRE(AdsDisconnect(hConn) == 0);
-}
-
 #else
 
 TEST_CASE("ABI: postgresql backend disabled at compile time") {

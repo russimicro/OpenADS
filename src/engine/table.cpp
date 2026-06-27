@@ -139,6 +139,20 @@ util::Result<void> Table::load_record_(std::uint32_t recno) {
     return {};
 }
 
+util::Result<void> Table::goto_record_for_build(std::uint32_t recno) {
+    // Raw positioning for a sequential build/scan: read the record by recno
+    // and DON'T reposition the active-order cursor the way goto_record does
+    // (compute_index_key_ + seek_key O(log n) + per-record walk). The build
+    // reads fields from the current record buffer (read_field / is_deleted /
+    // evaluate_index_expr) and never consults the active-order cursor, so
+    // skipping the reseek is transparent — and removes the dominant per-record
+    // cost when a random-ordered index is the active order during the build.
+    if (recno == 0 || recno > driver_->record_count()) {
+        return util::Error{5000, 0, "goto_record_for_build: recno out of range", ""};
+    }
+    return load_record_(recno);
+}
+
 std::string Table::compute_index_key_(const drivers::IIndex* idx) const {
     const std::string& expr    = idx->expression();
     const std::uint16_t key_len = idx->key_length();
@@ -151,14 +165,6 @@ std::string Table::compute_index_key_(const drivers::IIndex* idx) const {
         double d = 0.0;
         evaluate_index_expr_number(const_cast<Table&>(*this), expr, d);
         return fox_numeric_key(d);
-    }
-    // Numeric NTX keys are native zero-padded fixed-width text (negatives
-    // byte-complemented). Build them here so the write path and the engine's
-    // own seek-after-write stay byte-identical to what a native reader expects.
-    if (idx->key_encoding() == drivers::KeyEncoding::NtxNumeric) {
-        double d = 0.0;
-        evaluate_index_expr_number(const_cast<Table&>(*this), expr, d);
-        return ntx_numeric_key(d, idx->key_length(), idx->key_decimals());
     }
     // Compound expressions (UPPER(NAME), STR(AGE,3), concatenation,
     // SUBSTR, ...) handled by engine/index_expr.cpp. Bare field-name
@@ -255,6 +261,14 @@ bool Table::key_in_bottom_scope_(const std::string& key) const {
 void Table::set_recno_sequence(std::vector<std::uint32_t> seq) {
     recno_sequence_ = std::move(seq);
     sequence_idx_   = -1;
+    // Build the recno -> position reverse map so goto_record can re-sync
+    // sequence_idx_ in O(1) (last-wins if a recno repeats, which a SQL
+    // ORDER BY / DISTINCT result never produces).
+    recno_seq_index_.clear();
+    recno_seq_index_.reserve(recno_sequence_.size());
+    for (std::size_t i = 0; i < recno_sequence_.size(); ++i)
+        recno_seq_index_[recno_sequence_[i]] =
+            static_cast<std::uint32_t>(i);
 }
 
 util::Result<void> Table::goto_top() {
@@ -293,10 +307,12 @@ util::Result<void> Table::goto_top() {
         // true (Clipper / DBFCDX convention for "no visible row").
         if (!openads::abi::show_deleted()) {
             while (r.value().positioned) {
-                if (auto ld = load_record_(r.value().recno); !ld) {
-                    return ld.error();
-                }
-                if (!is_deleted()) return {};
+                auto ld = load_record_(r.value().recno);
+                if (!ld && ld.error().code != 5000) return ld.error();
+                // A 5000 here is a stale index entry (recno > rec_count,
+                // e.g. a PACK left this tag unreconstructed). Native ADSCDX
+                // walks past it, so treat it like a deleted row and advance.
+                if (ld && !is_deleted()) return {};
                 r = order_->descending_traverse()
                         ? idx->prev() : idx->next();
                 if (!r) return r.error();
@@ -307,7 +323,21 @@ util::Result<void> Table::goto_top() {
             }
             state_ = State::Limbo; recno_ = 0; return {};
         }
-        return load_record_(r.value().recno);
+        // SET DELETE OFF: land on the first index entry, stepping past any
+        // stale ones (recno > rec_count after a PACK) the way native ADSCDX
+        // does instead of raising ADSCDX/5000.
+        while (r.value().positioned) {
+            auto ld = load_record_(r.value().recno);
+            if (!ld && ld.error().code != 5000) return ld.error();
+            if (ld) return {};
+            r = order_->descending_traverse() ? idx->prev() : idx->next();
+            if (!r) return r.error();
+            if (r.value().positioned &&
+                !key_in_bottom_scope_(idx->current_key())) {
+                state_ = State::Limbo; recno_ = 0; return {};
+            }
+        }
+        state_ = State::Limbo; recno_ = 0; return {};
     }
     if (driver_->record_count() == 0) {
         // GOTOP on empty re-enters Limbo (BOF+EOF both true).
@@ -361,10 +391,11 @@ util::Result<void> Table::goto_bottom() {
         }
         if (!openads::abi::show_deleted()) {
             while (r.value().positioned) {
-                if (auto ld = load_record_(r.value().recno); !ld) {
-                    return ld.error();
-                }
-                if (!is_deleted()) {
+                auto ld = load_record_(r.value().recno);
+                if (!ld && ld.error().code != 5000) return ld.error();
+                // Stale index entry (recno > rec_count after a PACK): step
+                // past it like a deleted row instead of raising 5000.
+                if (ld && !is_deleted()) {
                     return {};
                 }
                 r = idx->prev();
@@ -372,7 +403,16 @@ util::Result<void> Table::goto_bottom() {
             }
             state_ = State::Limbo; recno_ = 0; return {};
         }
-        return load_record_(r.value().recno);
+        // SET DELETE OFF: land on the last entry, stepping back past stale
+        // ones the way native ADSCDX does instead of raising 5000.
+        while (r.value().positioned) {
+            auto ld = load_record_(r.value().recno);
+            if (!ld && ld.error().code != 5000) return ld.error();
+            if (ld) return {};
+            r = idx->prev();
+            if (!r) return r.error();
+        }
+        state_ = State::Limbo; recno_ = 0; return {};
     }
     auto n = driver_->record_count();
     if (n == 0) {
@@ -421,6 +461,16 @@ util::Result<void> Table::goto_record(std::uint32_t recno) {
     }
     auto r = load_record_(recno);
     if (!r) return r.error();
+    // Re-sync the recno-sequence cursor so a subsequent SKIP walks from the
+    // row we just landed on. An absolute GOTO / bookmark restore (which is
+    // how a TXBrowse repaints, then restores the selected row) does not
+    // otherwise touch sequence_idx_; leaving it stale made SKIP advance from
+    // the wrong position, so the painted row showed a DIFFERENT record than
+    // the pointer. -1 when recno isn't in the sequence (e.g. a stale
+    // bookmark) — SKIP's own BOF/index fallback then handles it.
+    if (!recno_sequence_.empty()) {
+        sequence_idx_ = recno_sequence_index(recno);
+    }
     // Re-position the active index cursor on this row's key so a
     // subsequent SKIP walks from here (and not from wherever the
     // index was left after a previous SEEK / SKIP-past-end). When
@@ -524,10 +574,27 @@ util::Result<void> Table::skip(std::int32_t delta) {
             if (skip_deleted) {
                 // Probe the row's deleted flag without advancing
                 // the user-visible step count.
-                if (auto ld = load_record_(r.value().recno); !ld) {
-                    return ld.error();
+                auto ld = load_record_(r.value().recno);
+                if (!ld) {
+                    if (ld.error().code != 5000) return ld.error();
+                    // Stale index entry (recno > rec_count after a PACK):
+                    // invisible like a deleted row — skip without counting.
+                    continue;
                 }
                 if (is_deleted()) continue;
+            } else if (r.value().recno > driver_->record_count()) {
+                // SET DELETED OFF doesn't load every row (perf), so a stale
+                // entry would only surface at the final load below. Gate
+                // cheaply on the recno range — no I/O in the common case —
+                // and only when it looks past the live count confirm with a
+                // load: a genuine just-appended row (peer multiuser) loads
+                // fine and counts; a stale PACK leftover returns 5000 and is
+                // skipped without counting.
+                auto ld = load_record_(r.value().recno);
+                if (!ld) {
+                    if (ld.error().code != 5000) return ld.error();
+                    continue;
+                }
             }
             last_live = r.value().recno;
             ++taken;
@@ -991,7 +1058,7 @@ util::Result<void> Table::pack() {
     std::uint32_t dst = 0;
     std::uint32_t total = driver_->record_count();
     for (std::uint32_t src = 1; src <= total; ++src) {
-        if (auto g = goto_record(src); !g) return g.error();
+        if (auto g = goto_record_for_build(src); !g) return g.error();
         if (is_deleted()) continue;
         ++dst;
         if (dst != src) {
@@ -1001,21 +1068,31 @@ util::Result<void> Table::pack() {
             }
         }
     }
-    // 2) Truncate the on-disk record count to `dst` by saving the
-    //    survivors, zapping the driver (DBF-only — does NOT touch
-    //    bound indexes), and re-appending. Pack matches Clipper's
-    //    semantics: indexes are left stale, the caller must REINDEX.
-    std::vector<std::vector<std::uint8_t>> survivors;
-    survivors.reserve(dst);
-    for (std::uint32_t i = 1; i <= dst; ++i) {
-        auto rec = driver_->read_record_raw(i);
-        if (!rec) return rec.error();
-        survivors.push_back(std::move(rec).value());
+    // 2) Drop the trailing stale rows. The copy-down above already placed the
+    //    survivors at recnos 1..dst, so this is a single header/EOF rewrite +
+    //    physical file truncate via truncate_to() — avoiding the read-all + zap
+    //    + re-append pass (a full extra I/O pass, with a per-record flush, that
+    //    dominated PACK on large tables). Drivers without truncate_to fall back
+    //    to that legacy path. Clipper semantics: indexes left stale, caller REINDEXes.
+    bool truncated = (dst >= total);   // nothing removed → records unchanged
+    if (!truncated) {
+        auto t = driver_->truncate_to(dst);
+        if (!t) return t.error();
+        truncated = t.value();
     }
-    if (auto r = driver_->zap(); !r) return r.error();
-    for (auto& buf : survivors) {
-        auto a = driver_->append_record_raw(buf.data(), buf.size());
-        if (!a) return a.error();
+    if (!truncated) {
+        std::vector<std::vector<std::uint8_t>> survivors;
+        survivors.reserve(dst);
+        for (std::uint32_t i = 1; i <= dst; ++i) {
+            auto rec = driver_->read_record_raw(i);
+            if (!rec) return rec.error();
+            survivors.push_back(std::move(rec).value());
+        }
+        if (auto r = driver_->zap(); !r) return r.error();
+        for (auto& buf : survivors) {
+            auto a = driver_->append_record_raw(buf.data(), buf.size());
+            if (!a) return a.error();
+        }
     }
     record_buf_.assign(driver_->record_length(), 0);
     // Clipper / DBFCDX semantics: PACK rebuilds the controlled indexes so a
@@ -1079,7 +1156,7 @@ util::Result<void> Table::reindex() {
     }
     auto rec_count = driver_->record_count();
     for (std::uint32_t r = 1; r <= rec_count; ++r) {
-        if (auto g = goto_record(r); !g) return g.error();
+        if (auto g = goto_record_for_build(r); !g) return g.error();
         if (is_deleted()) continue;
         if (auto s = sync_all_indexes_(snap); !s) return s.error();
     }
@@ -1100,6 +1177,14 @@ util::Result<void> Table::reindex() {
 
 util::Result<void> Table::flush() {
     if (auto r = driver_->flush(); !r) return r.error();
+    // A table opened Read-only must never rewrite its indexes on close:
+    // a read-only open/navigate cycle must leave the .cdx byte-identical
+    // (same mtime) so a SELECT/SQL cursor over a production table can't
+    // affect its official index. Each CdxIndex::flush() already guards on
+    // dirty pages, but skip the whole index walk here too so the
+    // production CDX is never even touched when mode_ == Read — mirrors
+    // lock_record_excl / lock_table_excl, which early-return on Read.
+    if (mode_ == OpenMode::Read) return {};
     if (order_ && order_->index()) {
         if (auto r = order_->index()->flush(); !r) return r.error();
     }

@@ -1,7 +1,6 @@
 #include "doctest.h"
 #include "openads/ace.h"
 #include "openads/error.h"
-#include "test_dd_make.h"
 
 #include <array>
 #include <cstdint>
@@ -72,15 +71,15 @@ fs::path make_ri_dbf(const fs::path& dir, const char* leaf,
     return p;
 }
 
-// Create a minimal Data Dictionary with parent/child tables.
+// Write a minimal text-format Data Dictionary.
 fs::path make_add(const fs::path& dir,
                   const std::string& extra_lines = {}) {
     auto p = dir / "test.add";
-    std::string body =
-        "TABLE parent=parent.dbf\n"
-        "TABLE child=child.dbf\n"
-        + extra_lines;
-    openads_test::make_dd(p, body);
+    std::ofstream f(p);
+    f << "# OpenADS Data Dictionary v1\n"
+      << "TABLE parent=parent.dbf\n"
+      << "TABLE child=child.dbf\n"
+      << extra_lines;
     return p;
 }
 

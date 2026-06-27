@@ -128,7 +128,6 @@ util::Result<void> NtxIndex::open(const std::string& path, IndexOpenMode mode) {
     next_avail_ = read_u32_le(hdr.data() + 8);
     item_size_  = read_u16_le(hdr.data() + 12);
     key_size_   = read_u16_le(hdr.data() + 14);
-    key_dec_    = read_u16_le(hdr.data() + 16);
     max_keys_   = read_u16_le(hdr.data() + 18);
     half_page_  = read_u16_le(hdr.data() + 20);
     key_expr_   = trim_nul(hdr.data() + 22, 256);
@@ -802,61 +801,6 @@ NtxIndex::create(const std::string& path,
     ix.key_expr_   = key_expr;
     ix.tag_name_   = tag_name;
     return ix;
-}
-
-util::Result<void>
-NtxIndex::set_numeric_format(std::uint16_t width, std::uint16_t dec) {
-    if (mode_ == IndexOpenMode::ReadOnly) {
-        return util::Error{5000, 0, "NTX opened read-only", ""};
-    }
-    // Only valid on a still-empty index — changing the key geometry after
-    // entries exist would invalidate every stored item.
-    if (root_page_ != 0) {
-        return util::Error{5000, 0,
-            "set_numeric_format on non-empty NTX index", ""};
-    }
-    if (width == 0) return {};
-    // A 1024-byte NTX page must hold the forced minimum of 4 keys; an item is
-    // width+8 bytes plus a 2-byte offset slot, so 4*(width+10) must fit in
-    // NTX_PAGE_SIZE-2. Beyond width 245 that overflows the page on insert.
-    if (width > 245) {
-        return util::Error{5000, 0,
-            "NTX numeric key width exceeds the page limit (max 245)", ""};
-    }
-
-    // Recompute geometry exactly as create() does, but from the field
-    // width instead of the probed / default key size.
-    std::uint16_t item_sz  = static_cast<std::uint16_t>(width + 8);
-    std::uint16_t max_keys = 0;
-    {
-        std::int32_t avail = NTX_PAGE_SIZE - 2;
-        std::int32_t per   = item_sz + 2;
-        max_keys = static_cast<std::uint16_t>((avail / per) - 1);
-        if (max_keys < 4) max_keys = 4;
-    }
-
-    key_size_  = width;
-    key_dec_   = dec;
-    numeric_   = true;   // keys are the native zero-padded numeric form
-    item_size_ = item_sz;
-    max_keys_  = max_keys;
-    half_page_ = static_cast<std::uint16_t>(max_keys / 2);
-
-    // Patch the on-disk header so a native reader (and our own reopen)
-    // sees the field-derived key width + decimals. Read-modify-write the
-    // 1024-byte header rather than rebuilding it, to preserve every other
-    // field create() wrote (expression, tag name, options, ...).
-    Page hdr{};
-    auto got = file_.read_at(0, hdr.data(), hdr.size());
-    if (!got) return got.error();
-    write_u16_le(hdr.data() + 12, item_size_);
-    write_u16_le(hdr.data() + 14, key_size_);
-    write_u16_le(hdr.data() + 16, key_dec_);
-    write_u16_le(hdr.data() + 18, max_keys_);
-    write_u16_le(hdr.data() + 20, half_page_);
-    auto wrote = file_.write_at(0, hdr.data(), hdr.size());
-    if (!wrote) return wrote.error();
-    return file_.sync();
 }
 
 } // namespace openads::drivers::ntx

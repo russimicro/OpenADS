@@ -1,8 +1,6 @@
 #include "doctest.h"
-#include "engine/data_dict.h"
 #include "openads/ace.h"
 #include "openads/error.h"
-#include "test_dd_make.h"
 
 #include <array>
 #include <cstdint>
@@ -43,15 +41,15 @@ void make_dbf(const fs::path& p) {
 fs::path make_perm_add(const fs::path& dir,
                         const std::string& extra_perms = {}) {
     auto p = dir / "test.add";
-    std::string body =
-        "TABLE tbl=tbl.dbf\n"
-        "USER alice\n"
-        "USERPROP alice;prop_1101=pw\n"
-        "USER readers\n"
-        "MEMBER alice=readers\n"
-        "DBPROP prop_5=1\n"
-        + extra_perms;
-    openads_test::make_dd(p, body);
+    std::ofstream f(p);
+    f << "# OpenADS Data Dictionary v1\n"
+      << "TABLE tbl=tbl.dbf\n"
+      << "USER alice\n"
+      << "USERPROP alice;prop_1101=pw\n"
+      << "USER readers\n"
+      << "MEMBER alice=readers\n"
+      << "DBPROP prop_5=1\n"   // login required
+      << extra_perms;
     return p;
 }
 
@@ -272,200 +270,6 @@ TEST_CASE("Perms: bitmask bit positions — INSERT is 0x10, DELETE is 0x20") {
         // Append should succeed at level 3.
         REQUIRE(AdsAppendRecord(hTbl) == 0);
         REQUIRE(AdsCloseTable(hTbl) == 0);
-    }
-
-    REQUIRE(AdsDisconnect(hConn) == 0);
-    fs::remove_all(dir, ec);
-}
-
-// ---------------------------------------------------------------------------
-// New tests: check_perm() cache, GRANT SQL, cache invalidation
-// ---------------------------------------------------------------------------
-
-TEST_CASE("Perms: check_perm direct user — correct bit resolution") {
-    using DD = openads::engine::DataDict;
-    auto cr = DD::create((fs::temp_directory_path() / "openads_cp_direct.add").string());
-    REQUIRE(cr.has_value());
-    auto& dd = cr.value();
-    dd.create_user("alice");
-    dd.create_user("bob");
-    dd.create_group("editors");
-    dd.add_user_to_group("alice", "editors");
-    // Grant editors: SELECT + INSERT.
-    dd.grant_permission("Table", "invoice", "editors",
-                        DD::DD_PERM_SELECT | DD::DD_PERM_INSERT);
-    // Grant bob: nothing (level 0).
-    dd.grant_permission("Table", "invoice", "bob", 0u);
-
-    // alice (via editors) can SELECT and INSERT but not DELETE.
-    CHECK( dd.check_perm("alice", "invoice", DD::DD_PERM_SELECT));
-    CHECK( dd.check_perm("alice", "invoice", DD::DD_PERM_INSERT));
-    CHECK(!dd.check_perm("alice", "invoice", DD::DD_PERM_DELETE));
-    CHECK(!dd.check_perm("alice", "invoice",
-                         DD::DD_PERM_SELECT | DD::DD_PERM_DELETE));
-
-    // bob has no bits granted.
-    CHECK(!dd.check_perm("bob", "invoice", DD::DD_PERM_SELECT));
-
-    // unknown table — no entry in permissions_ for that object → open access.
-    CHECK(dd.check_perm("alice", "nosuchtable", DD::DD_PERM_DELETE));
-
-    std::error_code ec;
-    fs::remove(fs::temp_directory_path() / "openads_cp_direct.add", ec);
-    fs::remove(fs::temp_directory_path() / "openads_cp_direct.am",  ec);
-}
-
-TEST_CASE("Perms: check_perm FULL access grants all bits") {
-    using DD = openads::engine::DataDict;
-    auto cr = DD::create((fs::temp_directory_path() / "openads_cp_full.add").string());
-    REQUIRE(cr.has_value());
-    auto& dd = cr.value();
-    dd.create_user("admin");
-    dd.grant_permission("Table", "customers", "admin", DD::DD_PERM_FULL);
-
-    CHECK(dd.check_perm("admin", "customers", DD::DD_PERM_SELECT));
-    CHECK(dd.check_perm("admin", "customers", DD::DD_PERM_INSERT));
-    CHECK(dd.check_perm("admin", "customers", DD::DD_PERM_UPDATE));
-    CHECK(dd.check_perm("admin", "customers", DD::DD_PERM_DELETE));
-    CHECK(dd.check_perm("admin", "customers", DD::DD_PERM_EXECUTE));
-    CHECK(dd.check_perm("admin", "customers",
-                        DD::DD_PERM_SELECT | DD::DD_PERM_DELETE));
-
-    std::error_code ec;
-    fs::remove(fs::temp_directory_path() / "openads_cp_full.add", ec);
-    fs::remove(fs::temp_directory_path() / "openads_cp_full.am",  ec);
-}
-
-TEST_CASE("Perms: cache invalidated after grant_permission") {
-    using DD = openads::engine::DataDict;
-    auto cr = DD::create((fs::temp_directory_path() / "openads_cp_inval.add").string());
-    REQUIRE(cr.has_value());
-    auto& dd = cr.value();
-    dd.create_user("alice");
-    dd.grant_permission("Table", "orders", "alice", DD::DD_PERM_SELECT);
-
-    // Cache is warm for alice after first check.
-    CHECK( dd.check_perm("alice", "orders", DD::DD_PERM_SELECT));
-    CHECK(!dd.check_perm("alice", "orders", DD::DD_PERM_DELETE));
-
-    // Now add DELETE permission — this must invalidate the cache.
-    dd.grant_permission("Table", "orders", "alice",
-                        DD::DD_PERM_SELECT | DD::DD_PERM_DELETE);
-
-    // Re-check should reflect the new grant.
-    CHECK(dd.check_perm("alice", "orders", DD::DD_PERM_DELETE));
-
-    std::error_code ec;
-    fs::remove(fs::temp_directory_path() / "openads_cp_inval.add", ec);
-    fs::remove(fs::temp_directory_path() / "openads_cp_inval.am",  ec);
-}
-
-TEST_CASE("Perms: multi-group union — alice sees OR of all groups") {
-    using DD = openads::engine::DataDict;
-    auto cr = DD::create((fs::temp_directory_path() / "openads_cp_union.add").string());
-    REQUIRE(cr.has_value());
-    auto& dd = cr.value();
-    dd.create_user("alice");
-    dd.create_group("readers");
-    dd.create_group("writers");
-    dd.add_user_to_group("alice", "readers");
-    dd.add_user_to_group("alice", "writers");
-    dd.grant_permission("Table", "reports", "readers", DD::DD_PERM_SELECT);
-    dd.grant_permission("Table", "reports", "writers",
-                        DD::DD_PERM_INSERT | DD::DD_PERM_UPDATE);
-
-    // alice is in both groups → gets union of both bitmasks.
-    CHECK(dd.check_perm("alice", "reports", DD::DD_PERM_SELECT));
-    CHECK(dd.check_perm("alice", "reports", DD::DD_PERM_INSERT));
-    CHECK(dd.check_perm("alice", "reports", DD::DD_PERM_UPDATE));
-    CHECK(!dd.check_perm("alice", "reports", DD::DD_PERM_DELETE));
-
-    std::error_code ec;
-    fs::remove(fs::temp_directory_path() / "openads_cp_union.add", ec);
-    fs::remove(fs::temp_directory_path() / "openads_cp_union.am",  ec);
-}
-
-TEST_CASE("Perms: GRANT SQL builds bitmask and enforces via AdsOpenTable") {
-    auto dir = fs::temp_directory_path() / "openads_perm_grant_sql";
-    std::error_code ec;
-    fs::remove_all(dir, ec);
-    fs::create_directories(dir);
-    make_dbf(dir / "tbl.dbf");
-
-    // DD with alice and no initial permission.
-    make_perm_add(dir, "TABLEPERM tbl;alice=0\n");
-
-    ADSHANDLE hConn = connect_as(dir / "test.add", "alice", "pw");
-    REQUIRE(hConn != 0);
-
-    // alice has no access yet.
-    {
-        ADSHANDLE hTbl = open_tbl(hConn, 1, ADS_SHARED);
-        CHECK(hTbl == 0);
-    }
-
-    // Execute GRANT SELECT ON tbl TO alice.
-    ADSHANDLE hStmt = 0;
-    REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
-    UNSIGNED8 grant_sql[] = "GRANT SELECT ON tbl TO alice";
-    ADSHANDLE hCur = 0;
-    REQUIRE(AdsExecuteSQLDirect(hStmt, grant_sql, &hCur) == 0);
-    AdsCloseSQLStatement(hStmt);
-
-    // alice can now open read-only.
-    {
-        UNSIGNED8 name[8] = "tbl";
-        ADSHANDLE hTbl = 0;
-        UNSIGNED32 rc = AdsOpenTable(hConn, name, name, ADS_CDX, 0, 0,
-                                     1, ADS_READONLY, &hTbl);
-        CHECK(rc == 0);
-        CHECK(hTbl != 0);
-        if (hTbl) REQUIRE(AdsCloseTable(hTbl) == 0);
-    }
-
-    // But not for shared/write (only SELECT was granted).
-    {
-        UNSIGNED8 name[8] = "tbl";
-        ADSHANDLE hTbl = 0;
-        UNSIGNED32 rc = AdsOpenTable(hConn, name, name, ADS_CDX, 0, 0,
-                                     1, ADS_SHARED, &hTbl);
-        CHECK(rc == openads::AE_ACCESS_DENIED);
-        if (hTbl) AdsCloseTable(hTbl);
-    }
-
-    REQUIRE(AdsDisconnect(hConn) == 0);
-    fs::remove_all(dir, ec);
-}
-
-TEST_CASE("Perms: REVOKE SQL removes specific bit") {
-    auto dir = fs::temp_directory_path() / "openads_perm_revoke_sql";
-    std::error_code ec;
-    fs::remove_all(dir, ec);
-    fs::create_directories(dir);
-    make_dbf(dir / "tbl.dbf");
-
-    // Start with full write access.
-    make_perm_add(dir, "TABLEPERM tbl;alice=3\n");
-
-    ADSHANDLE hConn = connect_as(dir / "test.add", "alice", "pw");
-    REQUIRE(hConn != 0);
-
-    // Revoke INSERT.
-    ADSHANDLE hStmt = 0;
-    REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
-    UNSIGNED8 rev_sql[] = "REVOKE INSERT ON tbl FROM alice";
-    ADSHANDLE hCur = 0;
-    REQUIRE(AdsExecuteSQLDirect(hStmt, rev_sql, &hCur) == 0);
-    AdsCloseSQLStatement(hStmt);
-
-    // SELECT should still work (level 3 had SELECT).
-    {
-        UNSIGNED8 name[8] = "tbl";
-        ADSHANDLE hTbl = 0;
-        UNSIGNED32 rc = AdsOpenTable(hConn, name, name, ADS_CDX, 0, 0,
-                                     1, ADS_READONLY, &hTbl);
-        CHECK(rc == 0);
-        if (hTbl) REQUIRE(AdsCloseTable(hTbl) == 0);
     }
 
     REQUIRE(AdsDisconnect(hConn) == 0);

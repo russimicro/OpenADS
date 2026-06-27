@@ -23,20 +23,6 @@ public:
     bool        unique()     const override { return unique_; }
     std::uint16_t key_length() const override { return key_size_; }
 
-    // A numeric NTX index (pinned via set_numeric_format) stores its keys in
-    // the native zero-padded / byte-complemented numeric form; the engine
-    // consults key_encoding() + key_decimals() to build matching keys.
-    KeyEncoding   key_encoding() const override {
-        return numeric_ ? KeyEncoding::NtxNumeric : KeyEncoding::Text;
-    }
-    std::uint16_t key_decimals() const override { return key_dec_; }
-    // Restore the numeric mark on a reopened index (the width/decimals are
-    // already read back from the NTX header by open()); a freshly created
-    // index gets marked via set_numeric_format instead.
-    void set_key_encoding(KeyEncoding e) override {
-        if (e == KeyEncoding::NtxNumeric) numeric_ = true;
-    }
-
     util::Result<SeekOutcome> seek_first() override;
     util::Result<SeekOutcome> seek_last()  override;
     util::Result<SeekOutcome>
@@ -50,21 +36,6 @@ public:
     util::Result<void> erase (std::uint32_t recno,
                               const std::string& key) override;
     util::Result<void> flush() override;
-
-    // Pin the key geometry to a numeric field's descriptor (width = field
-    // length, dec = field decimals) so the on-disk key matches the native
-    // fixed-width, right-justified ASCII form STR(value, width, dec). Must
-    // be called on a freshly created, still-empty index (before any
-    // insert): it rewrites key_size / item_size / max_keys and stores the
-    // decimal count in the NTX header so a native reader reads back the
-    // correct geometry. No-op behavioural change for character keys (they
-    // never call this). Returns an error if the index already holds data.
-    util::Result<void> set_numeric_format(std::uint16_t width,
-                                          std::uint16_t dec);
-
-    // Decimal places recorded in the NTX header (0 for character / integer
-    // keys). Exposed for tests / interop verification.
-    std::uint16_t key_dec() const { return key_dec_; }
 
     // Static helper used by AdsCreateIndex paths.
     static util::Result<NtxIndex>
@@ -118,8 +89,6 @@ private:
     std::uint32_t                                  root_page_ = 0;
     std::uint32_t                                  next_avail_= 0;
     std::uint16_t                                  key_size_  = 0;
-    std::uint16_t                                  key_dec_   = 0;
-    bool                                           numeric_   = false;
     std::uint16_t                                  item_size_ = 0;
     std::uint16_t                                  max_keys_  = 0;
     std::uint16_t                                  half_page_ = 0;

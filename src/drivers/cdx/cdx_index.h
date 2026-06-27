@@ -155,24 +155,6 @@ private:
     util::Result<std::vector<std::pair<std::string, std::uint32_t>>>
         decode_leaf_(std::uint32_t page_off);
 
-    // Starting at `leaf`, follow the right-sibling chain over any EMPTY
-    // leaves until a non-empty leaf is reached (or the chain ends). On
-    // return `leaf` is that non-empty leaf and `out` holds its decoded
-    // keys; if the chain ended with no more keys, `out` is empty. erase
-    // does not merge/free a leaf it empties, so the linked list can hold
-    // holes — every forward walk (seek_first/seek_key/next/seek_last)
-    // must skip them instead of stopping, or it would miss live keys.
-    util::Result<void> skip_empty_leaves_right_(
-        std::uint32_t& leaf,
-        std::vector<std::pair<std::string, std::uint32_t>>& out);
-
-    // Mirror of skip_empty_leaves_right_ for backward walks: follow the
-    // LEFT-sibling chain over empty leaves so prev() retreats onto the
-    // previous live key instead of stopping at the first hole.
-    util::Result<void> skip_empty_leaves_left_(
-        std::uint32_t& leaf,
-        std::vector<std::pair<std::string, std::uint32_t>>& out);
-
     util::Result<void>
         encode_leaf_(std::uint32_t page_off,
                      const std::vector<std::pair<std::string, std::uint32_t>>& keys,

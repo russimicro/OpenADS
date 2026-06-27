@@ -3,134 +3,84 @@
 #include "platform/file.h"
 
 #include <algorithm>
-#include <cstdint>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
-#include <filesystem>
 #include <sstream>
 #include <vector>
 
 namespace openads::engine {
 
-// ---------------------------------------------------------------------------
-// OpenADS DD ADT-format constants
-// ---------------------------------------------------------------------------
-//
-// .add  = ADT-compatible table (ADT signature header + 6 field descriptors
-//         + fixed-length records).
-// .am   = ADM-compatible memo file (256-byte blocks, next_avail at header+20).
-//
-// Field layout in the record (342 bytes total):
-//   [0]        del flag: 0x04=active, 0x05=deleted
-//   [1..4]     null bitmap (4 bytes, always zero)
-//   [5..8]     OBJ_ID    (uint32 LE, ADT Integer type 11, length 4)
-//   [9..12]    PARENT_ID (uint32 LE, ADT Integer type 11, length 4)
-//   [13..32]   OBJ_TYPE  (CHAR 20, space-padded,  ADT type 4)
-//   [33..232]  OBJ_NAME  (CHAR 200, space-padded, ADT type 4)
-//   [233..332] OBJ_KEY   (CHAR 100, space-padded, ADT type 4)
-//   [333..341] OBJ_DATA  (Memo 9:  uint32 block_no LE + uint32 data_len LE + 0x00)
-
-static constexpr std::uint32_t kDdHdrBase = 400;
-static constexpr std::uint32_t kDdFldSize = 200;
-static constexpr std::uint32_t kDdNumFlds = 6;
-static constexpr std::uint32_t kDdHdrLen  = kDdHdrBase + kDdNumFlds * kDdFldSize; // 1600
-static constexpr std::uint32_t kDdRecLen  = 342;
-static constexpr std::uint32_t kAmBlock   = 256;
-
-// ---------------------------------------------------------------------------
-// Low-level integer I/O
-// ---------------------------------------------------------------------------
-
 namespace {
 
-static inline std::uint32_t g32(const std::uint8_t* p, std::uint32_t off = 0) {
-    return  static_cast<std::uint32_t>(p[off])
-          | (static_cast<std::uint32_t>(p[off+1]) <<  8)
-          | (static_cast<std::uint32_t>(p[off+2]) << 16)
-          | (static_cast<std::uint32_t>(p[off+3]) << 24);
-}
-
-static inline void p32(std::uint8_t* p, std::uint32_t off, std::uint32_t v) {
-    p[off+0] = static_cast<std::uint8_t>( v        & 0xFFu);
-    p[off+1] = static_cast<std::uint8_t>((v >>  8) & 0xFFu);
-    p[off+2] = static_cast<std::uint8_t>((v >> 16) & 0xFFu);
-    p[off+3] = static_cast<std::uint8_t>((v >> 24) & 0xFFu);
-}
-
-static inline void p16(std::uint8_t* p, std::uint32_t off, std::uint16_t v) {
-    p[off+0] = static_cast<std::uint8_t>( v       & 0xFFu);
-    p[off+1] = static_cast<std::uint8_t>((v >> 8) & 0xFFu);
-}
-
-// Trim trailing spaces from a fixed-length CHAR field.
-static std::string chf(const std::uint8_t* p, std::uint32_t len) {
-    std::size_t n = len;
-    while (n > 0 && p[n-1] == ' ') --n;
-    return std::string(reinterpret_cast<const char*>(p), n);
-}
-
-// Derive .am path from .add path (replace extension).
-static std::string am_path(const std::string& add_path) {
-    auto dot = add_path.rfind('.');
-    auto sep = add_path.find_last_of("/\\");
-    if (dot == std::string::npos ||
-        (sep != std::string::npos && dot < sep))
-        return add_path + ".am";
-    return add_path.substr(0, dot) + ".am";
-}
-
-
-// ---------------------------------------------------------------------------
-// Binary .add helpers — string-based LE readers and record struct
-// ---------------------------------------------------------------------------
-
-static inline std::uint32_t le32(const std::string& buf, std::size_t off) {
-    return  static_cast<std::uint32_t>(static_cast<std::uint8_t>(buf[off]))
-          | (static_cast<std::uint32_t>(static_cast<std::uint8_t>(buf[off+1])) <<  8)
-          | (static_cast<std::uint32_t>(static_cast<std::uint8_t>(buf[off+2])) << 16)
-          | (static_cast<std::uint32_t>(static_cast<std::uint8_t>(buf[off+3])) << 24);
-}
-
-static inline std::uint16_t le16(const std::string& buf, std::size_t off) {
-    return static_cast<std::uint16_t>(
-              static_cast<std::uint16_t>(static_cast<std::uint8_t>(buf[off]))
-            | (static_cast<std::uint16_t>(static_cast<std::uint8_t>(buf[off+1])) << 8));
-}
-
-// Split a string on embedded NUL bytes.
+// Split a string on NUL bytes (used for binary-record property encoding).
 static std::vector<std::string> split_nul(const std::string& s) {
-    std::vector<std::string> out;
-    std::string cur;
-    for (char c : s) {
-        if (c == '\0') { out.push_back(cur); cur.clear(); }
-        else cur.push_back(c);
+    std::vector<std::string> parts;
+    std::size_t pos = 0;
+    while (pos <= s.size()) {
+        auto next = s.find('\0', pos);
+        if (next == std::string::npos) {
+            parts.push_back(s.substr(pos));
+            break;
+        }
+        parts.push_back(s.substr(pos, next - pos));
+        pos = next + 1;
     }
-    if (!cur.empty()) out.push_back(cur);
-    return out;
+    return parts;
 }
 
-// Read a JSON blob from the companion .am buffer using a 9-byte
-// more_property pointer ([4-byte LE block] [4-byte LE len] [0x00]).
-// Block size for the SAP continuation .am is 8 bytes.
-static std::string read_am_json(const std::string& am_buf,
-                                const std::array<std::uint8_t, 9>& mp) {
-    std::uint32_t blk = static_cast<std::uint32_t>(mp[0])
-                      | (static_cast<std::uint32_t>(mp[1]) <<  8)
-                      | (static_cast<std::uint32_t>(mp[2]) << 16)
-                      | (static_cast<std::uint32_t>(mp[3]) << 24);
-    std::uint32_t len = static_cast<std::uint32_t>(mp[4])
-                      | (static_cast<std::uint32_t>(mp[5]) <<  8)
-                      | (static_cast<std::uint32_t>(mp[6]) << 16)
-                      | (static_cast<std::uint32_t>(mp[7]) << 24);
-    if (blk == 0 || len == 0 || am_buf.empty()) return {};
-    std::size_t off = static_cast<std::size_t>(blk) * 8;
-    if (off >= am_buf.size()) return {};
-    std::size_t readable = std::min<std::size_t>(len, am_buf.size() - off);
-    return am_buf.substr(off, readable);
+// Join strings with NUL separators, capped at max_len bytes total.
+static std::string join_nul(std::initializer_list<std::string> parts,
+                              std::size_t max_len = 273) {
+    std::string result;
+    bool first = true;
+    for (const auto& p : parts) {
+        if (!first) result += '\0';
+        first = false;
+        result += p;
+        if (result.size() >= max_len) { result.resize(max_len); break; }
+    }
+    return result;
+}
+
+static inline uint32_t le32(const std::string& b, std::size_t off) {
+    return static_cast<uint32_t>(
+        static_cast<uint32_t>(static_cast<uint8_t>(b[off]))
+      | (static_cast<uint32_t>(static_cast<uint8_t>(b[off+1])) << 8)
+      | (static_cast<uint32_t>(static_cast<uint8_t>(b[off+2])) << 16)
+      | (static_cast<uint32_t>(static_cast<uint8_t>(b[off+3])) << 24));
+}
+
+static inline uint16_t le16(const std::string& b, std::size_t off) {
+    return static_cast<uint16_t>(
+        static_cast<uint16_t>(static_cast<uint8_t>(b[off]))
+      | static_cast<uint16_t>(static_cast<uint16_t>(static_cast<uint8_t>(b[off+1])) << 8));
+}
+
+static void put_le32(std::string& b, std::size_t off, uint32_t v) {
+    b[off+0] = static_cast<char>( v        & 0xFFu);
+    b[off+1] = static_cast<char>((v >>  8) & 0xFFu);
+    b[off+2] = static_cast<char>((v >> 16) & 0xFFu);
+    b[off+3] = static_cast<char>((v >> 24) & 0xFFu);
+}
+
+static void put_le16(std::string& b, std::size_t off, uint16_t v) {
+    b[off+0] = static_cast<char>( v       & 0xFFu);
+    b[off+1] = static_cast<char>((v >> 8) & 0xFFu);
+}
+
+std::string trim(std::string s) {
+    auto is_ws = [](char c) {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    };
+    std::size_t b = 0, e = s.size();
+    while (b < e && is_ws(s[b])) ++b;
+    while (e > b && is_ws(s[e - 1])) --e;
+    return s.substr(b, e - b);
 }
 
 // ---------------------------------------------------------------------------
-// JSON helpers (shared by trigger/proc/func/view serialization)
+// Minimal JSON helpers for OpenADS proprietary .am storage (no external deps)
 // ---------------------------------------------------------------------------
 
 static std::string json_escape(const std::string& s) {
@@ -147,8 +97,7 @@ static std::string json_escape(const std::string& s) {
             default:
                 if (c < 0x20u) {
                     char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x",
-                                  static_cast<unsigned>(c));
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
                     r += buf;
                 } else {
                     r += static_cast<char>(c);
@@ -177,6 +126,7 @@ static std::string trigger_to_json(const DataDict::TriggerEntry& e) {
     return j;
 }
 
+// Minimal flat-object JSON parser.  Only handles string/number/bool values.
 static std::unordered_map<std::string,std::string> json_parse_flat(const std::string& s) {
     std::unordered_map<std::string,std::string> m;
     std::size_t i = 0, n = s.size();
@@ -196,42 +146,6 @@ static std::unordered_map<std::string,std::string> json_parse_flat(const std::st
                     case 'n':  r += '\n'; break;
                     case 'r':  r += '\r'; break;
                     case 't':  r += '\t'; break;
-                    case 'u':
-                        // Decode \uXXXX (BMP only; handles what json_escape emits).
-                        if (i + 4 < n) {
-                            unsigned cp = 0;
-                            bool ok = true;
-                            for (int k = 1; k <= 4; ++k) {
-                                char h = s[i + static_cast<std::size_t>(k)];
-                                unsigned nib = 0;
-                                if      (h >= '0' && h <= '9') nib = static_cast<unsigned>(h - '0');
-                                else if (h >= 'a' && h <= 'f') nib = static_cast<unsigned>(h - 'a') + 10u;
-                                else if (h >= 'A' && h <= 'F') nib = static_cast<unsigned>(h - 'A') + 10u;
-                                else { ok = false; break; }
-                                cp = (cp << 4) | nib;
-                            }
-                            if (ok) {
-                                i += 4;
-                                // Emit as UTF-8 (values 0x0000..0xFFFF).
-                                if (cp == 0) {
-                                    // Silently drop embedded NUL bytes; they were
-                                    // SAP trailing terminators that leaked into the
-                                    // stored string.  This repairs old imports.
-                                } else if (cp < 0x80u) {
-                                    r += static_cast<char>(cp);
-                                } else if (cp < 0x800u) {
-                                    r += static_cast<char>(0xC0u | (cp >> 6));
-                                    r += static_cast<char>(0x80u | (cp & 0x3Fu));
-                                } else {
-                                    r += static_cast<char>(0xE0u | (cp >> 12));
-                                    r += static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu));
-                                    r += static_cast<char>(0x80u | (cp & 0x3Fu));
-                                }
-                                break;
-                            }
-                        }
-                        r += 'u';  // fallback: emit literal 'u'
-                        break;
                     default:   r += s[i]; break;
                 }
             } else { r += s[i]; }
@@ -245,7 +159,7 @@ static std::unordered_map<std::string,std::string> json_parse_flat(const std::st
     ++i;
     while (i < n) {
         skip_ws();
-        if (i >= n || s[i] == '}') break;
+        if (s[i] == '}' || i >= n) break;
         if (s[i] == ',') { ++i; continue; }
         if (s[i] != '"') break;
         std::string key = read_str();
@@ -259,8 +173,7 @@ static std::unordered_map<std::string,std::string> json_parse_flat(const std::st
             std::size_t st = i;
             while (i < n && s[i] != ',' && s[i] != '}') ++i;
             val = s.substr(st, i - st);
-            while (!val.empty() && (val.back()==' '||val.back()=='\t'))
-                val.pop_back();
+            while (!val.empty() && (val.back()==' '||val.back()=='\t')) val.pop_back();
         }
         m[key] = std::move(val);
     }
@@ -282,6 +195,24 @@ static bool json_to_trigger(const std::string& json,
     if (m.count("comment"))   e.comment   = m.at("comment");
     if (m.count("options"))   try { e.options = static_cast<std::uint32_t>(std::stoul(m.at("options"))); } catch (...) {}
     return true;
+}
+
+// Helper: read a JSON am block (shared by proc/func/view/trigger loaders).
+// Returns the raw bytes from am_buf at the block/len pointed to by more_property.
+static std::string read_am_json(const std::string& am_buf,
+                                 const std::array<std::uint8_t, 9>& mp) {
+    auto am_block = static_cast<uint32_t>(mp[0])
+                  | (static_cast<uint32_t>(mp[1]) <<  8)
+                  | (static_cast<uint32_t>(mp[2]) << 16)
+                  | (static_cast<uint32_t>(mp[3]) << 24);
+    auto am_len   = static_cast<uint32_t>(mp[4])
+                  | (static_cast<uint32_t>(mp[5]) <<  8)
+                  | (static_cast<uint32_t>(mp[6]) << 16)
+                  | (static_cast<uint32_t>(mp[7]) << 24);
+    if (am_block == 0 || am_len == 0 || am_buf.empty()) return {};
+    std::size_t am_off = static_cast<std::size_t>(am_block) * 8;
+    if (am_off + am_len > am_buf.size()) return {};
+    return am_buf.substr(am_off, am_len);
 }
 
 static std::string proc_to_json(const DataDict::ProcEntry& e) {
@@ -316,9 +247,9 @@ static std::string func_to_json(const DataDict::FunctionEntry& e) {
     j += "{\"fmt\":1,\"type\":\"Function\"";
     j += ",\"name\":\"";      j += json_escape(e.name);           j += '"';
     j += ",\"container\":\""; j += json_escape(e.container);      j += '"';
-    j += ",\"return\":\"";    j += json_escape(e.return_type);    j += '"';
-    j += ",\"input\":\"";     j += json_escape(e.input_params);   j += '"';
     j += ",\"body\":\"";      j += json_escape(e.implementation); j += '"';
+    j += ",\"input\":\"";     j += json_escape(e.input_params);   j += '"';
+    j += ",\"return\":\"";    j += json_escape(e.return_type);    j += '"';
     j += ",\"comment\":\"";   j += json_escape(e.comment);        j += '"';
     j += '}';
     return j;
@@ -329,9 +260,9 @@ static bool json_to_func(const std::string& json, DataDict::FunctionEntry& e) {
     if (m.count("type") && m.at("type") != "Function") return false;
     if (m.count("name"))      e.name           = m.at("name");
     if (m.count("container")) e.container      = m.at("container");
-    if (m.count("return"))    e.return_type    = m.at("return");
-    if (m.count("input"))     e.input_params   = m.at("input");
     if (m.count("body"))      e.implementation = m.at("body");
+    if (m.count("input"))     e.input_params   = m.at("input");
+    if (m.count("return"))    e.return_type    = m.at("return");
     if (m.count("comment"))   e.comment        = m.at("comment");
     return true;
 }
@@ -356,110 +287,53 @@ static bool json_to_view(const std::string& json, DataDict::ViewEntry& e) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Build the 1600-byte ADT header block for the DD table.
-// ---------------------------------------------------------------------------
-
-static std::vector<std::uint8_t> make_dd_adt_header(std::uint32_t rec_count) {
-    // Field descriptors (200 bytes each, 6 fields).
-    struct FdSpec { const char* name; std::uint16_t type; std::uint16_t len; std::uint16_t off; };
-    static const FdSpec kFds[] = {
-        {"OBJ_ID",    11,   4,   5},   // Integer
-        {"PARENT_ID", 11,   4,   9},   // Integer
-        {"OBJ_TYPE",   4,  20,  13},   // Character
-        {"OBJ_NAME",   4, 200,  33},   // Character
-        {"OBJ_KEY",    4, 100, 233},   // Character
-        {"OBJ_DATA",   5,   9, 333},   // Memo
-    };
-
-    std::vector<std::uint8_t> buf(kDdHdrLen, 0);
-
-    // 400-byte base header
-    std::memcpy(buf.data(), "Advantage Table", 15);
-    p32(buf.data(), 24, rec_count);
-    p32(buf.data(), 32, kDdHdrLen);
-    p32(buf.data(), 36, kDdRecLen);
-
-    // 200-byte field descriptors
-    for (std::uint32_t i = 0; i < kDdNumFlds; ++i) {
-        std::uint8_t* fd = buf.data() + kDdHdrBase + i * kDdFldSize;
-        std::size_t n = std::strlen(kFds[i].name);
-        std::memcpy(fd, kFds[i].name, n);
-        p16(fd, 129, static_cast<std::uint16_t>(kFds[i].type));
-        p16(fd, 131, kFds[i].off);
-        p16(fd, 135, kFds[i].len);
+// Write `content` into am_buf, reusing the existing block if it fits; otherwise
+// appending at an 8-byte-aligned offset.  Returns {am_block, am_len}.
+static std::pair<uint32_t,uint32_t> put_am_block(
+        std::string& am_buf,
+        const std::array<std::uint8_t,9>& old_mp,
+        const std::string& content) {
+    uint32_t old_block = static_cast<uint32_t>(old_mp[0])
+                       | (static_cast<uint32_t>(old_mp[1]) <<  8)
+                       | (static_cast<uint32_t>(old_mp[2]) << 16)
+                       | (static_cast<uint32_t>(old_mp[3]) << 24);
+    uint32_t old_len   = static_cast<uint32_t>(old_mp[4])
+                       | (static_cast<uint32_t>(old_mp[5]) <<  8)
+                       | (static_cast<uint32_t>(old_mp[6]) << 16)
+                       | (static_cast<uint32_t>(old_mp[7]) << 24);
+    uint32_t new_len = static_cast<uint32_t>(content.size());
+    if (old_block > 0 && old_len >= new_len) {
+        std::size_t am_off = static_cast<std::size_t>(old_block) * 8;
+        if (am_off + old_len > am_buf.size())
+            am_buf.resize(am_off + old_len, '\0');
+        for (std::size_t k = 0; k < new_len; ++k)
+            am_buf[am_off + k] = content[k];
+        for (std::size_t k = new_len; k < static_cast<std::size_t>(old_len); ++k)
+            am_buf[am_off + k] = ' ';
+        return {old_block, new_len};
     }
-    return buf;
+    std::size_t cur = am_buf.size();
+    std::size_t aligned = ((cur + 7) / 8) * 8;
+    if (aligned > cur) am_buf.resize(aligned, '\0');
+    uint32_t blk = static_cast<uint32_t>(am_buf.size() / 8);
+    am_buf += content;
+    return {blk, new_len};
 }
 
-// ---------------------------------------------------------------------------
-// Per-type JSON builders for "simple" types (not trigger/proc/func/view)
-// ---------------------------------------------------------------------------
-
-static std::string table_to_json(const DataDict::TableProps& tp) {
-    std::string j = "{";
-    j += "\"pk\":\"";          j += json_escape(tp.primary_key);   j += '"';
-    j += ",\"default_idx\":\""; j += json_escape(tp.default_index); j += '"';
-    j += ",\"comment\":\"";    j += json_escape(tp.comment);       j += '"';
-    j += '}';
-    return j;
+static void set_more_prop_(std::array<std::uint8_t,9>& mp,
+                            uint32_t blk, uint32_t len) {
+    mp[0] = static_cast<uint8_t>(blk);
+    mp[1] = static_cast<uint8_t>(blk >>  8);
+    mp[2] = static_cast<uint8_t>(blk >> 16);
+    mp[3] = static_cast<uint8_t>(blk >> 24);
+    mp[4] = static_cast<uint8_t>(len);
+    mp[5] = static_cast<uint8_t>(len >>  8);
+    mp[6] = static_cast<uint8_t>(len >> 16);
+    mp[7] = static_cast<uint8_t>(len >> 24);
+    mp[8] = 0;
 }
 
-static std::string link_to_json(const DataDict::LinkEntry& e) {
-    std::string j = "{";
-    j += "\"path\":\""; j += json_escape(e.path); j += '"';
-    j += ",\"user\":\""; j += json_escape(e.user); j += '"';
-    j += ",\"pwd\":\"";  j += json_escape(e.pwd);  j += '"';
-    j += '}';
-    return j;
-}
-
-static std::string ri_to_json(const DataDict::RiEntry& e) {
-    std::string j = "{";
-    j += "\"parent\":\"";     j += json_escape(e.parent);     j += '"';
-    j += ",\"child\":\"";     j += json_escape(e.child);      j += '"';
-    j += ",\"parent_tag\":\"";j += json_escape(e.parent_tag); j += '"';
-    j += ",\"child_tag\":\""; j += json_escape(e.child_tag);  j += '"';
-    j += ",\"upd\":\"";       j += json_escape(e.update_opt); j += '"';
-    j += ",\"del\":\"";       j += json_escape(e.delete_opt); j += '"';
-    j += ",\"fail\":\"";      j += json_escape(e.fail_table); j += '"';
-    j += '}';
-    return j;
-}
-
-// Build JSON from the field_props_ sub-map for one (table, field) pair.
-static std::string field_props_to_json(
-        const std::unordered_map<std::string,std::string>& kv) {
-    std::string j = "{";
-    bool first = true;
-    for (const auto& [k, v] : kv) {
-        if (!first) j += ',';
-        j += '"'; j += json_escape(k); j += "\":\""; j += json_escape(v); j += '"';
-        first = false;
-    }
-    j += '}';
-    return j;
-}
-
-// Build JSON from user_props_ for one user.
-static std::string user_props_to_json(
-        const std::unordered_map<std::string,std::string>& kv) {
-    std::string j = "{";
-    bool first = true;
-    for (const auto& [k, v] : kv) {
-        if (!first) j += ',';
-        j += '"'; j += json_escape(k); j += "\":\""; j += json_escape(v); j += '"';
-        first = false;
-    }
-    j += '}';
-    return j;
-}
-
-} // anonymous namespace
-
-// ---------------------------------------------------------------------------
-// DataDict::open / create
-// ---------------------------------------------------------------------------
+} // namespace
 
 util::Result<DataDict> DataDict::open(const std::string& path) {
     DataDict dd;
@@ -469,32 +343,30 @@ util::Result<DataDict> DataDict::open(const std::string& path) {
 }
 
 util::Result<DataDict> DataDict::create(const std::string& path) {
-    // Write a fresh ADT-format .add file (header only, 0 records).
-    auto hdr = make_dd_adt_header(0);
-    {
-        auto fres = platform::File::open(path, platform::OpenMode::CreateRW);
-        if (!fres) return fres.error();
-        auto& file = fres.value();
-        if (auto r = file.write_at(0, hdr.data(), hdr.size()); !r) return r.error();
-        if (auto r = file.sync(); !r) return r.error();
-    }
-
-    // Write an empty ADM memo file (.am).
-    {
-        auto amp = am_path(path);
-        auto amf = platform::File::open(amp, platform::OpenMode::CreateRW);
-        if (!amf) return amf.error();
-        std::vector<std::uint8_t> am_hdr(kAmBlock, 0);
-        p32(am_hdr.data(), 20, 1u);  // next_avail = 1 (block 0 = header)
-        if (auto r = amf.value().write_at(0, am_hdr.data(), am_hdr.size()); !r)
-            return r.error();
-        if (auto r = amf.value().sync(); !r) return r.error();
-    }
-
+    auto fres = platform::File::open(path, platform::OpenMode::CreateRW);
+    if (!fres) return fres.error();
+    auto file = std::move(fres).value();
+    const char* magic = "# OpenADS Data Dictionary v1\n";
+    auto wrote = file.write_at(0, magic, std::strlen(magic));
+    if (!wrote) return wrote.error();
+    if (auto s = file.sync(); !s) return s.error();
     DataDict dd;
     dd.path_ = path;
     return dd;
 }
+
+namespace {
+std::vector<std::string> split_tabs(const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : s) {
+        if (c == '\t') { out.push_back(cur); cur.clear(); }
+        else cur.push_back(c);
+    }
+    out.push_back(cur);
+    return out;
+}
+}  // namespace
 
 // Trim trailing spaces and embedded nulls from a fixed-length CHAR field.
 static std::string trim_char(const std::string& buf,
@@ -1518,524 +1390,310 @@ util::Result<void> DataDict::load_add_binary_(const std::string& buf) {
 }
 
 util::Result<void> DataDict::load_() {
-    namespace fs = std::filesystem;
-
     auto fres = platform::File::open(path_, platform::OpenMode::ReadOnly);
-    if (!fres) {
-        // Windows ERROR_SHARING_VIOLATION (sub_code 32): another process
-        // has the .add file open with exclusive lock — almost certainly SAP
-        // ADS/ACE.  Surface 5174 so the caller shows the import dialog.
-        if (fres.error().sub_code == 32)
-            return util::Error{5174, 0,
-                "SAP Advantage Data Dictionary is open exclusively by another "
-                "process (likely SAP ADS). Run import_dd to convert it to "
-                "OpenADS format.", path_};
-        return fres.error();
-    }
-    auto& file = fres.value();
-
-    auto sz_res = file.size();
-    if (!sz_res) return sz_res.error();
-    std::uint64_t file_sz = sz_res.value();
-
-    if (file_sz < kDdHdrLen) {
-        // File too small to be our format.
-        return util::Error{5103, 0,
-            "DD file too small (corrupt or wrong format)", path_};
+    if (!fres) return fres.error();
+    auto file = std::move(fres).value();
+    auto sz = file.size();
+    if (!sz) return sz.error();
+    std::string buf(static_cast<std::size_t>(sz.value()), '\0');
+    if (!buf.empty()) {
+        auto rd = file.read_at(0, buf.data(), buf.size());
+        if (!rd) return rd.error();
     }
 
-    // Read header block.
-    std::vector<std::uint8_t> hdr(kDdHdrLen, 0);
-    if (auto r = file.read_at(0, hdr.data(), hdr.size()); !r) return r.error();
-
-    // Check signature.
-    if (std::memcmp(hdr.data(), "Advantage Table", 15) != 0) {
-        // SAP binary .add files start with "ADS Data Dictionary".
-        // Parse them with load_add_binary_() so the import tool can open the
-        // copy it made and write memberships/permissions into it.
-        // AdsConnect60 rejects binary-format DDs via has_sap_permissions().
-        if (file_sz >= 19 && std::memcmp(hdr.data(), "ADS Data Dictionary", 19) == 0) {
-            std::vector<std::uint8_t> raw_buf(static_cast<std::size_t>(file_sz), 0);
-            if (auto r = file.read_at(0, raw_buf.data(), raw_buf.size()); !r)
-                return r.error();
-            std::string buf(reinterpret_cast<char*>(raw_buf.data()), raw_buf.size());
-            return load_add_binary_(buf);
-        }
-        return util::Error{5103, 0,
-            "DD file has unrecognised signature (expected OpenADS ADT format)", path_};
+    // Detect ADS proprietary binary format by its fixed signature.
+    if (buf.size() >= 20 &&
+        buf.compare(0, 19, "ADS Data Dictionary") == 0 &&
+        static_cast<uint8_t>(buf[19]) == 0x00) {
+        return load_add_binary_(buf);
     }
 
-    std::uint32_t rec_count = g32(hdr.data(), 24);
-    std::uint32_t hdr_len   = g32(hdr.data(), 32);
-    std::uint32_t rec_len   = g32(hdr.data(), 36);
-
-    if (hdr_len != kDdHdrLen || rec_len != kDdRecLen) {
-        return util::Error{5103, 0,
-            "DD file has wrong record/header dimensions (wrong version?)", path_};
-    }
-
-    if (rec_count == 0) return {};  // empty DD — nothing to parse
-
-    // Read all records.
-    std::vector<std::uint8_t> recs(
-        static_cast<std::size_t>(rec_count) * kDdRecLen, 0);
-    if (auto r = file.read_at(kDdHdrLen, recs.data(), recs.size()); !r)
-        return r.error();
-
-    // Read the companion .am memo file.
-    std::string am_buf;
-    {
-        auto amp = am_path(path_);
-        auto amf = platform::File::open(amp, platform::OpenMode::ReadOnly);
-        if (amf) {
-            auto amsz = amf.value().size();
-            if (amsz && amsz.value() > 0) {
-                am_buf.assign(static_cast<std::size_t>(amsz.value()), '\0');
-                if (auto r = amf.value().read_at(0, am_buf.data(), am_buf.size()); !r)
-                    am_buf.clear();
-            }
-        }
-    }
-
-    // Helper: read JSON from .am at a given memo reference.
-    auto read_json = [&](const std::uint8_t* rec_base) -> std::string {
-        std::uint32_t block_no = g32(rec_base, 333);
-        std::uint32_t data_len = g32(rec_base, 337);
-        if (block_no == 0 || data_len == 0 || am_buf.empty()) return {};
-        std::size_t off = static_cast<std::size_t>(block_no) * kAmBlock;
-        if (off + data_len > am_buf.size()) return {};
-        return am_buf.substr(off, data_len);
+    std::istringstream ss(buf);
+    std::string line;
+    auto starts_with = [](const std::string& s, const char* k) {
+        std::size_t n = std::strlen(k);
+        return s.size() >= n && s.compare(0, n, k) == 0;
     };
+    while (std::getline(ss, line)) {
+        line = trim(line);
+        if (line.empty() || line[0] == '#') continue;
 
-    // Parse records.
-    for (std::uint32_t i = 0; i < rec_count; ++i) {
-        const std::uint8_t* rec = recs.data() + i * kDdRecLen;
-        if (rec[0] != 0x04u) continue;  // deleted
+        if (starts_with(line, "TABLE ")) {
+            std::string body = line.substr(6);
+            auto eq = body.find('=');
+            if (eq == std::string::npos) continue;
+            std::string alias = trim(body.substr(0, eq));
+            std::string path  = trim(body.substr(eq + 1));
+            if (!alias.empty() && !path.empty()) tables_[alias] = path;
 
-        std::string obj_type = chf(rec + 13, 20);
-        std::string obj_name = chf(rec + 33, 200);
-        std::string obj_key  = chf(rec + 233, 100);
-        std::string json     = read_json(rec);
-
-        if (obj_type == "Table") {
-            // OBJ_NAME=alias, OBJ_KEY=relative_path, JSON={pk,default_idx,comment}
-            tables_[obj_name] = obj_key;
-            if (!json.empty()) {
-                auto m = json_parse_flat(json);
-                TableProps tp;
-                if (m.count("pk"))          tp.primary_key   = m.at("pk");
-                if (m.count("default_idx")) tp.default_index = m.at("default_idx");
-                if (m.count("comment"))     tp.comment       = m.at("comment");
-                if (!tp.primary_key.empty() || !tp.default_index.empty() ||
-                    !tp.comment.empty())
-                    table_props_[obj_name] = std::move(tp);
-            }
-
-        } else if (obj_type == "Index") {
-            // OBJ_NAME=table_alias, OBJ_KEY=index_path, JSON={comment}
+        } else if (starts_with(line, "INDEX ")) {
+            std::string body = line.substr(6);
+            auto eq = body.find('=');
+            if (eq == std::string::npos) continue;
+            std::string alias = trim(body.substr(0, eq));
+            std::string rest  = body.substr(eq + 1);
+            auto parts = split_tabs(rest);
+            if (alias.empty() || parts.empty() || parts[0].empty()) continue;
             IndexEntry e;
-            e.table_alias = obj_name;
-            e.index_path  = obj_key;
-            if (!json.empty()) {
-                auto m = json_parse_flat(json);
-                if (m.count("comment")) e.comment = m.at("comment");
-            }
+            e.table_alias = alias;
+            e.index_path  = parts[0];
+            if (parts.size() > 1) e.comment = parts[1];
             indexes_.push_back(std::move(e));
 
-        } else if (obj_type == "User") {
-            // OBJ_NAME=username, JSON={prop_*=value,...}
-            users_.insert(obj_name);
-            if (!json.empty()) {
-                auto m = json_parse_flat(json);
-                for (auto& [k, v] : m)
-                    user_props_[obj_name][k] = v;
+        } else if (starts_with(line, "USER ")) {
+            std::string name = trim(line.substr(5));
+            if (!name.empty()) users_.insert(name);
+
+        } else if (starts_with(line, "GROUP ")) {
+            std::string name = trim(line.substr(6));
+            if (!name.empty()) groups_.insert(name);
+
+        } else if (starts_with(line, "MEMBER ")) {
+            std::string body = line.substr(7);
+            auto eq = body.find('=');
+            if (eq == std::string::npos) continue;
+            std::string user  = trim(body.substr(0, eq));
+            std::string group = trim(body.substr(eq + 1));
+            if (!user.empty() && !group.empty()) {
+                memberships_[user].insert(group);
             }
 
-        } else if (obj_type == "Group") {
-            // OBJ_NAME=groupname
-            groups_.insert(obj_name);
-
-        } else if (obj_type == "Member") {
-            // OBJ_NAME=username, OBJ_KEY=groupname
-            memberships_[obj_name].insert(obj_key);
-
-        } else if (obj_type == "Link") {
-            // OBJ_NAME=alias, JSON={path,user,pwd}
+        } else if (starts_with(line, "LINK ")) {
+            std::string body = line.substr(5);
+            auto eq = body.find('=');
+            if (eq == std::string::npos) continue;
+            std::string alias = trim(body.substr(0, eq));
+            std::string rest  = body.substr(eq + 1);
+            auto parts = split_tabs(rest);
+            if (alias.empty() || parts.empty()) continue;
             LinkEntry e;
-            e.alias = obj_name;
-            if (!json.empty()) {
-                auto m = json_parse_flat(json);
-                if (m.count("path")) e.path = m.at("path");
-                if (m.count("user")) e.user = m.at("user");
-                if (m.count("pwd"))  e.pwd  = m.at("pwd");
-            }
-            links_[obj_name] = std::move(e);
+            e.alias = alias;
+            e.path  = parts[0];
+            if (parts.size() > 1) e.user = parts[1];
+            if (parts.size() > 2) e.pwd  = parts[2];
+            links_[alias] = std::move(e);
 
-        } else if (obj_type == "RI") {
-            // OBJ_NAME=ri_name, JSON={parent,child,...}
+        } else if (starts_with(line, "RI ")) {
+            std::string body = line.substr(3);
+            auto eq = body.find('=');
+            if (eq == std::string::npos) continue;
+            std::string name = trim(body.substr(0, eq));
+            std::string rest = body.substr(eq + 1);
+            // v2: parent;child;parent_tag;child_tag;update_opt;delete_opt;fail_table
+            // v1: parent;child;tag;update_opt;delete_opt;fail_table  (no child_tag)
+            std::vector<std::string> parts;
+            std::string cur;
+            for (char c : rest) {
+                if (c == ';') { parts.push_back(cur); cur.clear(); }
+                else cur.push_back(c);
+            }
+            parts.push_back(cur);
+            std::size_t nfields = parts.size();
+            while (parts.size() < 7) parts.emplace_back();
             RiEntry e;
-            e.name = obj_name;
-            if (!json.empty()) {
-                auto m = json_parse_flat(json);
-                if (m.count("parent"))     e.parent     = m.at("parent");
-                if (m.count("child"))      e.child      = m.at("child");
-                if (m.count("parent_tag")) e.parent_tag = m.at("parent_tag");
-                if (m.count("child_tag"))  e.child_tag  = m.at("child_tag");
-                if (m.count("upd"))        e.update_opt = m.at("upd");
-                if (m.count("del"))        e.delete_opt = m.at("del");
-                if (m.count("fail"))       e.fail_table = m.at("fail");
+            e.name = name;
+            e.parent = parts[0];
+            e.child  = parts[1];
+            if (nfields >= 7) {
+                // v2 format: parent;child;parent_tag;child_tag;update_opt;delete_opt;fail_table
+                e.parent_tag = parts[2];
+                e.child_tag  = parts[3];
+                e.update_opt = parts[4];
+                e.delete_opt = parts[5];
+                e.fail_table = parts[6];
+            } else {
+                // v1 format: parent;child;tag;update_opt;delete_opt;fail_table
+                e.parent_tag = parts[2];
+                e.child_tag  = "";
+                e.update_opt = parts[3];
+                e.delete_opt = parts[4];
+                e.fail_table = parts[5];
             }
-            ri_[obj_name] = std::move(e);
+            ri_[name] = std::move(e);
 
-        } else if (obj_type == "DbProp") {
-            // OBJ_NAME=prop_key, JSON={value}
-            if (!json.empty()) {
-                auto m = json_parse_flat(json);
-                db_props_[obj_name] = m.count("value") ? m.at("value") : "";
-            }
+        } else if (starts_with(line, "DBPROP ")) {
+            std::string body = line.substr(7);
+            auto eq = body.find('=');
+            if (eq == std::string::npos) continue;
+            db_props_[trim(body.substr(0, eq))] = trim(body.substr(eq + 1));
 
-        } else if (obj_type == "FieldProp") {
-            // OBJ_NAME=table, OBJ_KEY=field, JSON={key=value,...}
-            if (!json.empty()) {
-                auto m = json_parse_flat(json);
-                for (auto& [k, v] : m)
-                    field_props_[obj_name][obj_key][k] = v;
-            }
+        } else if (starts_with(line, "USERPROP ")) {
+            std::string body = line.substr(9);
+            auto sc = body.find(';');
+            if (sc == std::string::npos) continue;
+            std::string user = trim(body.substr(0, sc));
+            std::string rest = body.substr(sc + 1);
+            auto eq = rest.find('=');
+            if (eq == std::string::npos) continue;
+            user_props_[user][trim(rest.substr(0, eq))] =
+                trim(rest.substr(eq + 1));
 
-        } else if (obj_type == "Perm") {
-            // OBJ_NAME=obj_name, OBJ_KEY=grantee, JSON={obj_type,bitmask}
-            if (!json.empty()) {
-                auto m  = json_parse_flat(json);
-                std::string ot = m.count("obj_type") ? m.at("obj_type") : "Table";
-                std::uint32_t bitmask = 0;
-                if (m.count("bitmask")) {
-                    try { bitmask = static_cast<std::uint32_t>(
-                              std::stoul(m.at("bitmask"))); } catch (...) {}
-                }
-                bool is_grp = (groups_.find(obj_key) != groups_.end());
-                auto type_code_of = [](const std::string& t) -> int {
-                    if (t == "Table")      return 1;
-                    if (t == "View")       return 6;
-                    if (t == "StoredProc") return 10;
-                    if (t == "Function")   return 18;
-                    return 0;
-                };
+        } else if (starts_with(line, "TABLEPERM ")) {
+            // TABLEPERM <table>;<user_or_group>=<level>
+            std::string body = line.substr(10);
+            auto sc = body.find(';');
+            if (sc == std::string::npos) continue;
+            std::string tbl  = trim(body.substr(0, sc));
+            std::string rest = body.substr(sc + 1);
+            auto eq = rest.find('=');
+            if (eq == std::string::npos) continue;
+            std::string ug  = trim(rest.substr(0, eq));
+            std::string lvs = trim(rest.substr(eq + 1));
+            if (tbl.empty() || ug.empty() || lvs.empty()) continue;
+            try {
+                int level = std::stoi(lvs);
+                table_perms_[tbl][ug] = level;
+                // Mirror into permissions_ so eff_ops enforcement works.
+                uint32_t bitmask = 0;
+                if (level >= 1) bitmask |= 0x001u;           // READ
+                if (level >= 2) bitmask |= 0x002u | 0x010u;  // UPDATE|INSERT
+                if (level >= 3) bitmask |= 0x020u;           // DELETE
+                if (level >= 4) bitmask  = 0x80000000u;      // full sentinel
+                bool is_grp = (groups_.find(ug) != groups_.end());
                 PermissionEntry pe;
-                pe.object_name      = obj_name;
-                pe.object_type      = ot;
-                pe.object_type_code = type_code_of(ot);
-                pe.grantee          = obj_key;
+                pe.object_name      = tbl;
+                pe.object_type      = "Table";
+                pe.object_type_code = 1;
+                pe.grantee          = ug;
                 pe.grantee_is_group = is_grp;
                 pe.bitmask          = bitmask;
                 permissions_.push_back(std::move(pe));
-                // Reconstruct table_perms_ coarse level from Table perms.
-                if (ot == "Table") {
-                    int level = 0;
-                    if (bitmask & 0x80000000u)            level = 4;
-                    else if (bitmask & 0x020u)            level = 3;
-                    else if (bitmask & (0x010u | 0x002u)) level = 2;
-                    else if (bitmask & 0x001u)            level = 1;
-                    table_perms_[obj_name][obj_key] = level;
-                }
+            }
+            catch (...) {}
+
+        } else if (starts_with(line, "FIELDPROP ")) {
+            // FIELDPROP <table>;<field>;<key>=<value>
+            std::string body = line.substr(10);
+            auto sc1 = body.find(';');
+            if (sc1 == std::string::npos) continue;
+            std::string tbl  = trim(body.substr(0, sc1));
+            std::string rest = body.substr(sc1 + 1);
+            auto sc2 = rest.find(';');
+            if (sc2 == std::string::npos) continue;
+            std::string fld  = trim(rest.substr(0, sc2));
+            std::string kv   = rest.substr(sc2 + 1);
+            auto eq = kv.find('=');
+            if (eq == std::string::npos) continue;
+            field_props_[tbl][fld][trim(kv.substr(0, eq))] = trim(kv.substr(eq + 1));
+
+        } else if (starts_with(line, "TRIGGER ")) {
+            // TRIGGER <name>=<table>;<event_mask>;<timing>;<priority>;<enabled>;<container>;<procedure>;<comment>;<options>
+            // (Legacy 7-field format: <table>;<event_mask>;<priority>;<enabled>;<container>;<proc>;<comment>)
+            std::string body = line.substr(8);
+            auto eq = body.find('=');
+            if (eq == std::string::npos) continue;
+            std::string name = trim(body.substr(0, eq));
+            std::string rest = body.substr(eq + 1);
+            std::vector<std::string> parts;
+            std::string cur;
+            for (char c : rest) {
+                if (c == ';') { parts.push_back(cur); cur.clear(); }
+                else cur.push_back(c);
+            }
+            parts.push_back(cur);
+            while (parts.size() < 9) parts.emplace_back();
+            TriggerEntry e;
+            e.name        = name;
+            e.table_alias = parts[0];
+            try { e.event_mask = static_cast<std::uint32_t>(std::stoul(parts[1])); } catch (...) {}
+            try { e.timing     = static_cast<std::uint32_t>(std::stoul(parts[2])); } catch (...) {}
+            try { e.priority   = static_cast<std::uint32_t>(std::stoul(parts[3])); } catch (...) {}
+            e.enabled   = (parts[4] != "0");
+            e.container = parts[5];
+            e.procedure = parts[6];
+            e.comment   = parts[7];
+            if (!parts[8].empty()) try { e.options = static_cast<std::uint32_t>(std::stoul(parts[8])); } catch (...) {}
+            if (!name.empty()) {
+                std::string key = !e.table_alias.empty()
+                                ? e.table_alias + "::" + name : name;
+                triggers_[key] = std::move(e);
             }
 
-        } else if (obj_type == "Trigger") {
-            // OBJ_NAME=table::name, JSON=trigger JSON blob
-            TriggerEntry e;
-            if (!json.empty()) json_to_trigger(json, e);
-            if (!e.name.empty() && !e.table_alias.empty())
-                triggers_[e.table_alias + "::" + e.name] = std::move(e);
-
-        } else if (obj_type == "Proc") {
-            // OBJ_NAME=proc_name, JSON=proc JSON blob
+        } else if (starts_with(line, "PROC ")) {
+            // PROC <name>=<container>;<procedure>;<input>;<output>;<comment>
+            std::string body = line.substr(5);
+            auto eq = body.find('=');
+            if (eq == std::string::npos) continue;
+            std::string name = trim(body.substr(0, eq));
+            std::string rest = body.substr(eq + 1);
+            std::vector<std::string> parts;
+            std::string cur;
+            for (char c : rest) {
+                if (c == ';') { parts.push_back(cur); cur.clear(); }
+                else cur.push_back(c);
+            }
+            parts.push_back(cur);
+            while (parts.size() < 5) parts.emplace_back();
             ProcEntry e;
-            if (!json.empty()) json_to_proc(json, e);
-            if (!e.name.empty()) procs_[e.name] = std::move(e);
+            e.name          = name;
+            e.container     = parts[0];
+            e.procedure     = parts[1];
+            e.input_params  = parts[2];
+            e.output_params = parts[3];
+            e.comment       = parts[4];
+            if (!name.empty()) procs_[name] = std::move(e);
 
-        } else if (obj_type == "Function") {
-            // OBJ_NAME=func_name, JSON=function JSON blob
-            FunctionEntry e;
-            if (!json.empty()) json_to_func(json, e);
-            if (!e.name.empty()) functions_[e.name] = std::move(e);
-
-        } else if (obj_type == "View") {
-            // OBJ_NAME=view_name, JSON=view JSON blob
+        } else if (starts_with(line, "VIEW ")) {
+            // VIEW <name>=<comment>;<sql>
+            std::string body = line.substr(5);
+            auto eq = body.find('=');
+            if (eq == std::string::npos) continue;
+            std::string name = trim(body.substr(0, eq));
+            std::string rest = body.substr(eq + 1);
+            auto sc = rest.find(';');
             ViewEntry e;
-            if (!json.empty()) json_to_view(json, e);
-            if (!e.name.empty()) views_[e.name] = std::move(e);
+            e.name    = name;
+            e.comment = (sc != std::string::npos) ? rest.substr(0, sc) : "";
+            e.sql     = (sc != std::string::npos) ? rest.substr(sc + 1) : rest;
+            if (!name.empty()) views_[name] = std::move(e);
         }
-        // Unknown OBJ_TYPE values are silently skipped (forward compatibility).
     }
     return {};
 }
-
-// ---------------------------------------------------------------------------
-// DataDict::save
-// ---------------------------------------------------------------------------
-//
-// Full rewrite: serialise all in-memory data to a fresh .add + .am pair,
-// then atomically replace the existing files (write to .tmp, rename).
-
-util::Result<void> DataDict::save() {
-    namespace fs = std::filesystem;
-
-    // ---------- Collect all records to write ----------
-
-    struct DdRec {
-        std::uint32_t obj_id    = 0;
-        std::uint32_t parent_id = 0;
-        std::string obj_type;   // ≤20 chars
-        std::string obj_name;   // ≤200 chars
-        std::string obj_key;    // ≤100 chars
-        std::string json;       // goes to .am memo
-    };
-
-    std::vector<DdRec> recs;
-    std::uint32_t next_id = 1;
-
-    auto mk = [&](const char* type, const std::string& name,
-                  const std::string& key, const std::string& json) {
-        DdRec r;
-        r.obj_id   = next_id++;
-        r.obj_type = type;
-        r.obj_name = name;
-        r.obj_key  = key;
-        r.json     = json;
-        recs.push_back(std::move(r));
-    };
-
-    // Tables
-    {
-        std::vector<std::string> keys;
-        for (auto& kv : tables_) keys.push_back(kv.first);
-        std::sort(keys.begin(), keys.end());
-        for (auto& alias : keys) {
-            const std::string& path = tables_.at(alias);
-            DataDict::TableProps empty_tp;
-            const auto& tp = table_props_.count(alias)
-                           ? table_props_.at(alias) : empty_tp;
-            mk("Table", alias, path, table_to_json(tp));
-        }
-    }
-
-    // Indexes
-    for (auto& e : indexes_) {
-        mk("Index", e.table_alias, e.index_path,
-           "{\"comment\":\"" + json_escape(e.comment) + "\"}");
-    }
-
-    // Users (with their properties embedded in JSON)
-    {
-        std::vector<std::string> us(users_.begin(), users_.end());
-        std::sort(us.begin(), us.end());
-        for (auto& u : us) {
-            auto it = user_props_.find(u);
-            std::string j = (it != user_props_.end())
-                          ? user_props_to_json(it->second) : "{}";
-            mk("User", u, "", j);
-        }
-    }
-
-    // Groups
-    {
-        std::vector<std::string> gs(groups_.begin(), groups_.end());
-        std::sort(gs.begin(), gs.end());
-        for (auto& g : gs) mk("Group", g, "", "{}");
-    }
-
-    // Members (user → group)
-    for (auto& [user, gset] : memberships_) {
-        std::vector<std::string> gs(gset.begin(), gset.end());
-        std::sort(gs.begin(), gs.end());
-        for (auto& g : gs) mk("Member", user, g, "{}");
-    }
-
-    // Links
-    {
-        std::vector<std::string> keys;
-        for (auto& kv : links_) keys.push_back(kv.first);
-        std::sort(keys.begin(), keys.end());
-        for (auto& a : keys) mk("Link", a, "", link_to_json(links_.at(a)));
-    }
-
-    // RI rules
-    {
-        std::vector<std::string> keys;
-        for (auto& kv : ri_) keys.push_back(kv.first);
-        std::sort(keys.begin(), keys.end());
-        for (auto& n : keys) mk("RI", n, "", ri_to_json(ri_.at(n)));
-    }
-
-    // DB properties
-    {
-        std::vector<std::string> keys;
-        for (auto& kv : db_props_) keys.push_back(kv.first);
-        std::sort(keys.begin(), keys.end());
-        for (auto& k : keys)
-            mk("DbProp", k, "",
-               "{\"value\":\"" + json_escape(db_props_.at(k)) + "\"}");
-    }
-
-    // Field properties
-    {
-        std::vector<std::string> tbls;
-        for (auto& kv : field_props_) tbls.push_back(kv.first);
-        std::sort(tbls.begin(), tbls.end());
-        for (auto& tbl : tbls) {
-            std::vector<std::string> flds;
-            for (auto& kv : field_props_.at(tbl)) flds.push_back(kv.first);
-            std::sort(flds.begin(), flds.end());
-            for (auto& fld : flds)
-                mk("FieldProp", tbl, fld,
-                   field_props_to_json(field_props_.at(tbl).at(fld)));
-        }
-    }
-
-    // Permissions (fine-grained bitmask grants for all object types)
-    for (const auto& pe : permissions_) {
-        std::string j = "{\"obj_type\":\"" + json_escape(pe.object_type) + "\"";
-        j += ",\"bitmask\":" + std::to_string(pe.bitmask) + "}";
-        mk("Perm", pe.object_name, pe.grantee, j);
-    }
-
-    // Triggers
-    {
-        std::vector<std::string> keys;
-        for (auto& kv : triggers_) keys.push_back(kv.first);
-        std::sort(keys.begin(), keys.end());
-        for (auto& k : keys) mk("Trigger", k, "", trigger_to_json(triggers_.at(k)));
-    }
-
-    // Stored procedures
-    {
-        std::vector<std::string> keys;
-        for (auto& kv : procs_) keys.push_back(kv.first);
-        std::sort(keys.begin(), keys.end());
-        for (auto& k : keys) mk("Proc", k, "", proc_to_json(procs_.at(k)));
-    }
-
-    // User-defined functions
-    {
-        std::vector<std::string> keys;
-        for (auto& kv : functions_) keys.push_back(kv.first);
-        std::sort(keys.begin(), keys.end());
-        for (auto& k : keys) mk("Function", k, "", func_to_json(functions_.at(k)));
-    }
-
-    // Views
-    {
-        std::vector<std::string> keys;
-        for (auto& kv : views_) keys.push_back(kv.first);
-        std::sort(keys.begin(), keys.end());
-        for (auto& k : keys) mk("View", k, "", view_to_json(views_.at(k)));
-    }
-
-    // ---------- Build binary buffers ----------
-
-    std::uint32_t rec_count = static_cast<std::uint32_t>(recs.size());
-
-    // .add buffer: header + records
-    auto add_buf = make_dd_adt_header(rec_count);
-    add_buf.resize(kDdHdrLen + static_cast<std::size_t>(rec_count) * kDdRecLen, 0);
-
-    // .am buffer: header block + data blocks
-    // Block 0 is the header (next_avail at offset 20); data starts at block 1.
-    std::vector<std::uint8_t> am_buf(kAmBlock, 0);
-    std::uint32_t am_next = 1;
-
-    // Write memo JSON into am_buf, return (block_no, data_len).
-    auto am_append = [&](const std::string& json)
-            -> std::pair<std::uint32_t, std::uint32_t> {
-        if (json.empty()) return {0, 0};
-        std::uint32_t start     = am_next;
-        std::uint32_t data_len  = static_cast<std::uint32_t>(json.size());
-        std::uint32_t blocks    = (data_len + kAmBlock - 1) / kAmBlock;
-        std::size_t   old_sz    = am_buf.size();
-        am_buf.resize(old_sz + static_cast<std::size_t>(blocks) * kAmBlock, 0);
-        std::memcpy(am_buf.data() + old_sz, json.data(), json.size());
-        am_next += blocks;
-        return {start, data_len};
-    };
-
-    for (std::uint32_t i = 0; i < rec_count; ++i) {
-        auto& r = recs[i];
-        std::uint8_t* rec = add_buf.data() + kDdHdrLen + i * kDdRecLen;
-
-        rec[0] = 0x04u;  // active
-        p32(rec, 5, r.obj_id);
-        p32(rec, 9, r.parent_id);
-
-        // OBJ_TYPE: CHAR 20, space-padded
-        std::memset(rec + 13, ' ', 20);
-        std::size_t tn = std::min(r.obj_type.size(), std::size_t(20));
-        if (tn) std::memcpy(rec + 13, r.obj_type.data(), tn);
-
-        // OBJ_NAME: CHAR 200, space-padded
-        std::memset(rec + 33, ' ', 200);
-        std::size_t nn = std::min(r.obj_name.size(), std::size_t(200));
-        if (nn) std::memcpy(rec + 33, r.obj_name.data(), nn);
-
-        // OBJ_KEY: CHAR 100, space-padded
-        std::memset(rec + 233, ' ', 100);
-        std::size_t kn = std::min(r.obj_key.size(), std::size_t(100));
-        if (kn) std::memcpy(rec + 233, r.obj_key.data(), kn);
-
-        // OBJ_DATA: memo reference (block_no + data_len + 0x00)
-        auto [block_no, data_len] = am_append(r.json);
-        p32(rec, 333, block_no);
-        p32(rec, 337, data_len);
-        // rec[341] = 0x00 (already zero from resize)
-    }
-
-    // Update .am header: write next_avail at offset 20.
-    p32(am_buf.data(), 20, am_next);
-
-    // ---------- Atomic write: .add.new → .add, .am.new → .am ----------
-
-    auto add_tmp = path_ + ".new";
-    auto am_tmp  = am_path(path_) + ".new";
-
-    {
-        auto fres = platform::File::open(add_tmp, platform::OpenMode::CreateRW);
-        if (!fres) return fres.error();
-        if (auto r = fres.value().write_at(0, add_buf.data(), add_buf.size()); !r)
-            return r.error();
-        if (auto r = fres.value().sync(); !r) return r.error();
-    }
-    {
-        auto fres = platform::File::open(am_tmp, platform::OpenMode::CreateRW);
-        if (!fres) return fres.error();
-        if (auto r = fres.value().write_at(0, am_buf.data(), am_buf.size()); !r)
-            return r.error();
-        if (auto r = fres.value().sync(); !r) return r.error();
-    }
-
-    std::error_code ec;
-    fs::rename(add_tmp, path_, ec);
-    if (ec) return util::Error{5000, 0,
-        "DD save: rename .add.new failed: " + ec.message(), path_};
-    fs::rename(am_tmp, am_path(path_), ec);
-    if (ec) return util::Error{5000, 0,
-        "DD save: rename .am.new failed: " + ec.message(), am_path(path_)};
-
-    return {};
-}
-
-// ---------------------------------------------------------------------------
-// TABLE
-// ---------------------------------------------------------------------------
 
 util::Result<void>
 DataDict::add_table(const std::string& alias,
                     const std::string& relative_path) {
-    if (alias.empty() || relative_path.empty())
+    if (alias.empty() || relative_path.empty()) {
         return util::Error{5000, 0, "DD alias / path must be non-empty", ""};
+    }
     tables_[alias] = relative_path;
+    if (binary_format_) {
+        // Look for an existing active Table record with this alias to update.
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "Table" && r.obj_name == alias) {
+                r.property  = relative_path + '\0';
+                r.prop_null = false;
+                return save();
+            }
+        }
+        // Not found: add a new Table record.
+        BinaryRecord r;
+        r.active    = true;
+        r.obj_id    = binary_alloc_id_();
+        r.parent_id = binary_obj_id_of_("Database", "Database");
+        if (r.parent_id == 0) r.parent_id = 1;  // safe fallback
+        r.obj_type  = "Table";
+        r.obj_name  = alias;
+        r.property  = relative_path + '\0';
+        r.prop_null = false;
+        r.info1     = 0;
+        r.info2     = 0;
+        binary_recs_.push_back(std::move(r));
+    }
     return save();
 }
 
 util::Result<void> DataDict::remove_table(const std::string& alias) {
     tables_.erase(alias);
+    if (binary_format_) {
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "Table" && r.obj_name == alias) {
+                r.active = false;
+                break;
+            }
+        }
+    }
     return save();
 }
 
@@ -2045,8 +1703,7 @@ std::string DataDict::resolve(const std::string& alias_or_path) const {
     return alias_or_path;
 }
 
-std::string DataDict::get_table_property(const std::string& alias,
-                                          int prop_code) const {
+std::string DataDict::get_table_property(const std::string& alias, int prop_code) const {
     auto it = table_props_.find(alias);
     if (it == table_props_.end()) return {};
     switch (prop_code) {
@@ -2064,51 +1721,97 @@ void DataDict::set_table_property(const std::string& alias, int prop_code,
     switch (prop_code) {
         case 202: tp.primary_key   = value; break;
         case 213: tp.default_index = value; break;
-        case 'C': case 704: tp.comment = value; break;
-        default: break;
+        default: return;
+    }
+    if (binary_format_) {
+        std::string path = tables_.count(alias) ? tables_.at(alias) : "";
+        std::string prop = join_nul({path, tp.primary_key, tp.default_index, tp.comment});
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "Table" && r.obj_name == alias) {
+                r.property  = std::move(prop);
+                r.prop_null = false;
+                save();
+                return;
+            }
+        }
     }
 }
-
-// ---------------------------------------------------------------------------
-// INDEX
-// ---------------------------------------------------------------------------
 
 util::Result<void>
 DataDict::add_index_file(const std::string& table_alias,
                          const std::string& index_path,
                          const std::string& comment) {
-    for (auto& e : indexes_)
-        if (e.table_alias == table_alias && e.index_path == index_path)
-            return save();
-    IndexEntry e;
-    e.table_alias = table_alias;
-    e.index_path  = index_path;
-    e.comment     = comment;
-    indexes_.push_back(std::move(e));
+    if (table_alias.empty() || index_path.empty()) {
+        return util::Error{5000, 0, "DD index alias / path empty", ""};
+    }
+    indexes_.push_back({table_alias, index_path, comment});
+    if (binary_format_) {
+        // Derive index filename (basename) for obj_name.
+        std::string idx_name = index_path;
+        auto slash = idx_name.find_last_of("/\\");
+        if (slash != std::string::npos) idx_name = idx_name.substr(slash + 1);
+
+        uint32_t tbl_id = binary_obj_id_of_("Table", table_alias);
+        BinaryRecord r;
+        r.active    = true;
+        r.obj_id    = binary_alloc_id_();
+        r.parent_id = (tbl_id != 0) ? tbl_id : 1;
+        r.obj_type  = "Index";
+        r.obj_name  = idx_name;
+        r.property  = index_path + '\0';
+        r.prop_null = false;
+        r.info1     = 0;
+        r.info2     = 0x80000000u;
+        binary_recs_.push_back(std::move(r));
+    }
     return save();
 }
 
 util::Result<void>
 DataDict::remove_index_file(const std::string& table_alias,
-                             const std::string& index_path) {
-    indexes_.erase(
-        std::remove_if(indexes_.begin(), indexes_.end(),
-            [&](const IndexEntry& e) {
-                return e.table_alias == table_alias &&
-                       e.index_path  == index_path;
-            }),
-        indexes_.end());
+                            const std::string& index_path) {
+    auto it = std::remove_if(indexes_.begin(), indexes_.end(),
+        [&](const IndexEntry& e) {
+            return e.table_alias == table_alias && e.index_path == index_path;
+        });
+    indexes_.erase(it, indexes_.end());
+    if (binary_format_) {
+        // Derive index filename for matching binary record obj_name.
+        std::string idx_name = index_path;
+        auto slash = idx_name.find_last_of("/\\");
+        if (slash != std::string::npos) idx_name = idx_name.substr(slash + 1);
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "Index" && r.obj_name == idx_name) {
+                r.active = false;
+                break;
+            }
+        }
+    }
     return save();
 }
 
-// ---------------------------------------------------------------------------
-// USER / GROUP / MEMBER
-// ---------------------------------------------------------------------------
-
 util::Result<void> DataDict::create_user(const std::string& user) {
-    if (user.empty())
+    if (user.empty()) {
         return util::Error{5000, 0, "DD user name empty", ""};
+    }
     users_.insert(user);
+    if (binary_format_) {
+        for (const auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "User" && r.obj_name == user)
+                return save();
+        }
+        BinaryRecord r;
+        r.active    = true;
+        r.obj_id    = binary_alloc_id_();
+        r.parent_id = binary_obj_id_of_("Database", "Database");
+        if (r.parent_id == 0) r.parent_id = 1;
+        r.obj_type  = "User";
+        r.obj_name  = user;
+        r.prop_null = true;     // password not managed by OpenADS
+        r.info1     = 1;
+        r.info2     = 0x80000000u;
+        binary_recs_.push_back(std::move(r));
+    }
     return save();
 }
 
@@ -2116,19 +1819,80 @@ util::Result<void> DataDict::delete_user(const std::string& user) {
     users_.erase(user);
     memberships_.erase(user);
     user_props_.erase(user);
+    if (binary_format_) {
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "User" && r.obj_name == user) {
+                r.active = false;
+                break;
+            }
+        }
+    }
     return save();
 }
 
 util::Result<void>
 DataDict::add_user_to_group(const std::string& user,
                             const std::string& group) {
-    if (user.empty() || group.empty())
+    if (user.empty() || group.empty()) {
         return util::Error{5000, 0, "DD member user / group empty", ""};
-    // Auto-create DB: built-in groups in groups_ so they round-trip.
-    if (group.size() >= 3 &&
-        group[0]=='D' && group[1]=='B' && group[2]==':')
-        groups_.insert(group);
+    }
     memberships_[user].insert(group);
+    if (binary_format_) {
+        // Write a Permission record (parent=user, info1=group, info2=INHERIT).
+        // This is the standard SAP ACE v8+ format for group membership and is
+        // what AdsDDAddUserToGroup writes to the .add file.  We do NOT write
+        // property-byte XOR tokens: the derivation of K[slot] from the database
+        // key is proprietary to the ACE DLL and would require the same 20-byte
+        // random Database property to reproduce.  Permission records are read
+        // back correctly by the Second pass in load_add_binary_().
+        uint32_t user_id  = binary_obj_id_of_("User",  user);
+        uint32_t group_id = binary_obj_id_of_("Group", group);
+
+        // DB: built-in groups (DB:Admin, DB:Backup, DB:Debug, DB:Public) have
+        // no Group records in SAP-created .add files.  Auto-create one so the
+        // Permission record below has a valid target ID and the membership
+        // survives save/load.
+        if (group_id == 0 && group.size() >= 3 &&
+            group[0]=='D' && group[1]=='B' && group[2]==':') {
+            groups_.insert(group);
+            BinaryRecord gr;
+            gr.active    = true;
+            gr.obj_id    = binary_alloc_id_();
+            gr.parent_id = binary_obj_id_of_("Database", "Database");
+            if (gr.parent_id == 0) gr.parent_id = 1;
+            gr.obj_type  = "Group";
+            gr.obj_name  = group;
+            gr.prop_null = true;
+            gr.info1     = 0;
+            gr.info2     = 0;
+            group_id     = gr.obj_id;
+            binary_recs_.push_back(std::move(gr));
+        }
+
+        if (user_id == 0 || group_id == 0)
+            return save();  // IDs not in DD yet — membership is in-memory only
+        for (const auto& r : binary_recs_) {
+            // Only count OpenADS-written (prop_null=false) records as "already exists".
+            // SAP-written records (prop_null=true) will be wiped by clear_sap_permissions;
+            // we must create a prop_null=false replacement even when they're present.
+            if (r.active && r.obj_type == "Permission" && !r.prop_null &&
+                r.parent_id == user_id && r.info1 == group_id)
+                return save();  // already exists (OpenADS-written record)
+        }
+        char name_buf[9];
+        std::snprintf(name_buf, sizeof(name_buf), "%08X", group_id);
+        BinaryRecord perm;
+        perm.active    = true;
+        perm.obj_id    = binary_alloc_id_();
+        perm.parent_id = user_id;
+        perm.obj_type  = "Permission";
+        perm.obj_name  = name_buf;   // conventional: hex(group_id)
+        perm.prop_null = false;
+        perm.property  = name_buf;
+        perm.info1     = group_id;
+        perm.info2     = 0x80000000u;  // INHERIT flag = "member of group"
+        binary_recs_.push_back(std::move(perm));
+    }
     return save();
 }
 
@@ -2139,6 +1903,19 @@ DataDict::remove_user_from_group(const std::string& user,
     if (it != memberships_.end()) {
         it->second.erase(group);
         if (it->second.empty()) memberships_.erase(it);
+    }
+    if (binary_format_) {
+        uint32_t user_id  = binary_obj_id_of_("User",  user);
+        uint32_t group_id = binary_obj_id_of_("Group", group);
+        if (user_id != 0 && group_id != 0) {
+            for (auto& r : binary_recs_) {
+                if (r.active && r.obj_type == "Permission" &&
+                    r.parent_id == user_id && r.info1 == group_id) {
+                    r.active = false;
+                    break;
+                }
+            }
+        }
     }
     return save();
 }
@@ -2157,29 +1934,12 @@ DataDict::groups_of(const std::string& user) const {
     return it == memberships_.end() ? empty : it->second;
 }
 
-util::Result<void> DataDict::create_group(const std::string& group) {
-    if (group.empty())
-        return util::Error{5000, 0, "DD group name empty", ""};
-    groups_.insert(group);
-    return save();
-}
-
-util::Result<void> DataDict::delete_group(const std::string& group) {
-    groups_.erase(group);
-    // Remove all memberships referencing this group.
-    for (auto& [u, gs] : memberships_) gs.erase(group);
-    return save();
-}
-
-// ---------------------------------------------------------------------------
-// LINK
-// ---------------------------------------------------------------------------
-
 util::Result<void>
 DataDict::create_link(const std::string& alias, const std::string& path,
                       const std::string& user, const std::string& pwd) {
-    if (alias.empty() || path.empty())
+    if (alias.empty() || path.empty()) {
         return util::Error{5000, 0, "DD link alias / path empty", ""};
+    }
     links_[alias] = {alias, path, user, pwd};
     return save();
 }
@@ -2193,38 +1953,59 @@ util::Result<void>
 DataDict::modify_link(const std::string& alias, const std::string& path,
                       const std::string& user, const std::string& pwd) {
     auto it = links_.find(alias);
-    if (it == links_.end())
+    if (it == links_.end()) {
         return util::Error{5000, 0, "DD link not found", alias};
+    }
     if (!path.empty()) it->second.path = path;
     it->second.user = user;
     it->second.pwd  = pwd;
     return save();
 }
 
-// ---------------------------------------------------------------------------
-// REFERENTIAL INTEGRITY
-// ---------------------------------------------------------------------------
-
 util::Result<void> DataDict::create_ri(const RiEntry& e) {
     if (e.name.empty())
         return util::Error{5000, 0, "DD RI name empty", ""};
     ri_[e.name] = e;
+    if (binary_format_) {
+        auto prop = join_nul({e.parent, e.child, e.parent_tag, e.child_tag,
+                               e.update_opt, e.delete_opt, e.fail_table});
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "Relation" && r.obj_name == e.name) {
+                r.property = prop; r.prop_null = false;
+                return save();
+            }
+        }
+        BinaryRecord r;
+        r.active    = true;
+        r.obj_id    = binary_alloc_id_();
+        r.parent_id = binary_obj_id_of_("Database", "Database");
+        if (r.parent_id == 0) r.parent_id = 1;
+        r.obj_type  = "Relation";
+        r.obj_name  = e.name;
+        r.property  = prop;
+        r.prop_null = false;
+        binary_recs_.push_back(std::move(r));
+    }
     return save();
 }
 
 util::Result<void> DataDict::remove_ri(const std::string& name) {
     ri_.erase(name);
+    if (binary_format_) {
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "Relation" && r.obj_name == name) {
+                r.active = false; break;
+            }
+        }
+    }
     return save();
 }
 
-// ---------------------------------------------------------------------------
-// DB / USER PROPERTIES
-// ---------------------------------------------------------------------------
-
 util::Result<void>
 DataDict::set_db_property(const std::string& key, const std::string& value) {
-    if (key.empty())
+    if (key.empty()) {
         return util::Error{5000, 0, "DD db-property key empty", ""};
+    }
     db_props_[key] = value;
     return save();
 }
@@ -2238,8 +2019,9 @@ util::Result<void>
 DataDict::set_user_property(const std::string& user,
                             const std::string& key,
                             const std::string& value) {
-    if (user.empty() || key.empty())
+    if (user.empty() || key.empty()) {
         return util::Error{5000, 0, "DD user-property user / key empty", ""};
+    }
     user_props_[user][key] = value;
     return save();
 }
@@ -2253,10 +2035,6 @@ DataDict::get_user_property(const std::string& user,
     return k == u->second.end() ? std::string{} : k->second;
 }
 
-// ---------------------------------------------------------------------------
-// PERMISSIONS
-// ---------------------------------------------------------------------------
-
 util::Result<void>
 DataDict::grant_permission(const std::string& obj_type,
                             const std::string& obj_name,
@@ -2267,7 +2045,8 @@ DataDict::grant_permission(const std::string& obj_type,
 
     bool is_grp = (groups_.find(grantee) != groups_.end());
 
-    // Keep table_perms_ coarse-level map in sync for Table objects.
+    // Keep table_perms_ coarse-level map in sync for Table objects
+    // (used by get_effective_permission and text-format TABLEPERM lines).
     if (obj_type == "Table") {
         int lvl = 0;
         if (bitmask & 0x80000000u)            lvl = 4;
@@ -2277,37 +2056,92 @@ DataDict::grant_permission(const std::string& obj_type,
         table_perms_[obj_name][grantee] = lvl;
     }
 
-    invalidate_perm_cache_();
-
     // Update existing permissions_ entry or append a new one.
+    bool found = false;
     for (auto& pe : permissions_) {
         if (pe.object_name == obj_name && pe.object_type == obj_type &&
             pe.grantee == grantee) {
             pe.bitmask          = bitmask;
             pe.grantee_is_group = is_grp;
-            return save();
+            found = true;
+            break;
         }
     }
-    auto type_code_of = [](const std::string& t) -> int {
-        if (t == "Table")      return 1;
-        if (t == "Field")      return 4;
-        if (t == "View")       return 6;
-        if (t == "User")       return 8;
-        if (t == "Group")      return 9;
-        if (t == "StoredProc") return 10;
-        if (t == "Database")   return 11;
-        if (t == "Link")       return 12;
-        if (t == "Function")   return 18;
-        return 0;
-    };
-    PermissionEntry pe;
-    pe.object_name      = obj_name;
-    pe.object_type      = obj_type;
-    pe.object_type_code = type_code_of(obj_type);
-    pe.grantee          = grantee;
-    pe.grantee_is_group = is_grp;
-    pe.bitmask          = bitmask;
-    permissions_.push_back(std::move(pe));
+    if (!found) {
+        auto type_code_of = [](const std::string& t) -> int {
+            if (t == "Table")      return 1;
+            if (t == "Field")      return 4;
+            if (t == "View")       return 6;
+            if (t == "User")       return 8;
+            if (t == "Group")      return 9;
+            if (t == "StoredProc") return 10;
+            if (t == "Database")   return 11;
+            if (t == "Link")       return 12;
+            if (t == "Function")   return 18;
+            return 0;
+        };
+        PermissionEntry pe;
+        pe.object_name      = obj_name;
+        pe.object_type      = obj_type;
+        pe.object_type_code = type_code_of(obj_type);
+        pe.grantee          = grantee;
+        pe.grantee_is_group = is_grp;
+        pe.bitmask          = bitmask;
+        permissions_.push_back(std::move(pe));
+    }
+
+    if (binary_format_) {
+        // Resolve grantee and target obj_ids.
+        uint32_t grantee_id = binary_obj_id_of_("User", grantee);
+        if (grantee_id == 0) grantee_id = binary_obj_id_of_("Group", grantee);
+        uint32_t target_id  = binary_obj_id_of_(obj_type, obj_name);
+        if (grantee_id == 0 || target_id == 0)
+            return save();  // objects not in binary DD yet — in-memory only
+
+        // Deactivate any existing Permission record for (grantee, target).
+        // This supersedes SAP-written records with the 0x80000000 full-access
+        // sentinel, replacing them with the actual imported bitmask.
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "Permission" &&
+                r.parent_id == grantee_id && r.info1 == target_id)
+                r.active = false;
+        }
+
+        char name_buf[9];
+        std::snprintf(name_buf, sizeof(name_buf), "%08X", target_id);
+        BinaryRecord perm;
+        perm.active    = true;
+        perm.obj_id    = binary_alloc_id_();
+        perm.parent_id = grantee_id;
+        perm.obj_type  = "Permission";
+        perm.obj_name  = name_buf;
+        perm.prop_null = false;
+        perm.property  = name_buf;
+        perm.info1     = target_id;
+        perm.info2     = bitmask;
+        binary_recs_.push_back(std::move(perm));
+    }
+    return save();
+}
+
+util::Result<void> DataDict::clear_sap_permissions() {
+    // Remove all SAP-written ACL Permission records (identified by prop_null=true).
+    // These are the encrypted binary blobs that openads_import_dd cannot decode via
+    // system.permissions SQL; leaving them in the file would keep has_sap_permissions_
+    // true and cause AdsConnect60 to return AE_SAP_PERMS_NEED_IMPORT (5174) forever.
+    if (binary_format_) {
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "Permission" && r.prop_null)
+                r.active = false;
+        }
+    }
+    // Also purge from the in-memory permission list any entry that had no real bitmask
+    // (bitmask==0x80000000 sentinel from SAP).
+    permissions_.erase(
+        std::remove_if(permissions_.begin(), permissions_.end(),
+            [](const PermissionEntry& pe) { return pe.bitmask == 0x80000000u; }),
+        permissions_.end());
+    has_sap_permissions_ = false;
     return save();
 }
 
@@ -2317,167 +2151,155 @@ DataDict::set_table_permission(const std::string& table,
                                 int level) {
     if (table.empty() || user_or_group.empty())
         return util::Error{5000, 0, "TABLEPERM table/user empty", ""};
-    std::uint32_t bitmask = 0;
-    if (level >= 1) bitmask |= DD_PERM_SELECT;
-    if (level >= 2) bitmask |= DD_PERM_UPDATE | DD_PERM_INSERT;
-    if (level >= 3) bitmask |= DD_PERM_DELETE;
-    if (level >= 4) bitmask  = DD_PERM_FULL;
-    // grant_permission() will call invalidate_perm_cache_() itself.
+    uint32_t bitmask = 0;
+    if (level >= 1) bitmask |= 0x001u;
+    if (level >= 2) bitmask |= 0x002u | 0x010u;
+    if (level >= 3) bitmask |= 0x020u;
+    if (level >= 4) bitmask  = 0x80000000u;
     return grant_permission("Table", table, user_or_group, bitmask);
 }
 
 // ---------------------------------------------------------------------------
-// Effective permission helpers
+// Per-operation effective permissions
 // ---------------------------------------------------------------------------
 
-namespace {
-
-// Merge a raw bitmask from one PermissionEntry into an accumulated result.
-// The FULL sentinel (bit 31) grants all DML bits.
-static uint32_t expand_bitmask(uint32_t mask) {
-    if (mask & DataDict::DD_PERM_FULL)
-        return DataDict::DD_PERM_SELECT | DataDict::DD_PERM_UPDATE |
-               DataDict::DD_PERM_INSERT | DataDict::DD_PERM_DELETE |
-               DataDict::DD_PERM_EXECUTE | DataDict::DD_PERM_REFERENCE |
-               DataDict::DD_PERM_GRANT;
-    return mask;
-}
-
-static DataDict::EffectiveOps ops_from_bitmask(uint32_t mask) {
-    uint32_t m = expand_bitmask(mask);
+// Translate a stored info2 bitmask + grantee context to an EffectiveOps.
+//
+// SAP binary .add files store 0x80000000 as a constant sentinel in info2 for
+// ALL Permission records (both group and user ACL entries).  The actual per-bit
+// rights (READ, UPDATE, INSERT, DELETE, …) are encoded in two encrypted 8-byte
+// property-zone blobs using a proprietary SAP algorithm.  OpenADS cannot
+// decode those blobs; for group grants we fall back to full DML.
+//
+// OpenADS-written Permission records store the actual ADS_PERMISSION_* bitmask
+// directly in info2 (without encryption):
+//   0x001=READ/SELECT  0x002=UPDATE   0x004=EXECUTE  0x008=INHERIT(meta, skip)
+//   0x010=INSERT       0x020=DELETE
+static DataDict::EffectiveOps ops_from_bitmask(uint32_t mask, bool is_group) {
     DataDict::EffectiveOps ops;
-    ops.select_  = (m & DataDict::DD_PERM_SELECT)  != 0;
-    ops.update_  = (m & DataDict::DD_PERM_UPDATE)  != 0;
-    ops.execute_ = (m & DataDict::DD_PERM_EXECUTE) != 0;
-    ops.insert_  = (m & DataDict::DD_PERM_INSERT)  != 0;
-    ops.delete_  = (m & DataDict::DD_PERM_DELETE)  != 0;
-    return ops;
-}
+    const uint32_t SAP_SENTINEL = 0x80000000u;
 
-} // namespace
-
-// Build the effective-permission cache for the named user.
-// For each distinct (object_name) that appears in permissions_,
-// we OR together the bits from direct user grants and every group
-// the user belongs to.
-void DataDict::build_perm_cache(const std::string& username) const {
-    // Collect the user's principals (self + groups).
-    std::unordered_set<std::string> principals;
-    principals.insert(username);
-    auto mg = memberships_.find(username);
-    if (mg != memberships_.end())
-        for (const auto& g : mg->second) principals.insert(g);
-
-    // Store the raw OR of all bitmasks for each object.  Do NOT expand FULL
-    // here — we need the sentinel bit preserved so get_effective_permission()
-    // can distinguish level 4 from level 3.  Expansion happens at check time.
-    std::unordered_map<std::string, uint32_t> obj_bits;
-    for (const auto& pe : permissions_) {
-        if (principals.find(pe.grantee) == principals.end()) continue;
-        obj_bits[pe.object_name] |= pe.bitmask;
+    if (mask & SAP_SENTINEL) {
+        // SAP-written sentinel: actual per-bit rights are in encrypted blobs.
+        // For group ACL entries: assume full DML (SELECT + UPDATE + INSERT + DELETE).
+        // For user ACL entries: 0x80000000 alone means INHERIT-only from groups;
+        //   effective DML comes via group membership resolution in get_effective_ops.
+        if (is_group) {
+            ops.select_  = true;
+            ops.update_  = true;
+            ops.insert_  = true;
+            ops.delete_  = true;
+        }
+    } else {
+        // OpenADS-written bitmask: ADS_PERMISSION_* bit layout from ace.h.
+        ops.select_  = (mask & 0x001u) != 0;  // ADS_PERMISSION_READ
+        ops.update_  = (mask & 0x002u) != 0;  // ADS_PERMISSION_UPDATE
+        ops.execute_ = (mask & 0x004u) != 0;  // ADS_PERMISSION_EXECUTE
+        // 0x008 = ADS_PERMISSION_INHERIT — meta-flag, not a DML right, skip
+        ops.insert_  = (mask & 0x010u) != 0;  // ADS_PERMISSION_INSERT
+        ops.delete_  = (mask & 0x020u) != 0;  // ADS_PERMISSION_DELETE
     }
-    perm_cache_[username] = std::move(obj_bits);
-}
-
-bool DataDict::check_perm(const std::string& username,
-                           const std::string& object_name,
-                           uint32_t           required) const {
-    // No ACL at all → open access.
-    if (permissions_.empty()) return true;
-
-    // Ensure cache is populated for this user.
-    if (perm_cache_.find(username) == perm_cache_.end())
-        build_perm_cache(username);
-
-    const auto& user_map = perm_cache_.at(username);
-    auto it = user_map.find(object_name);
-    if (it == user_map.end())
-        return true;   // no entry for this object → unrestricted
-
-    // Expand raw bitmask before testing (FULL sentinel → all individual bits).
-    return (expand_bitmask(it->second) & required) == required;
+    return ops;
 }
 
 DataDict::EffectiveOps DataDict::get_effective_ops(
         const std::string& username,
         const std::string& object_name) const {
-    // No ACL defined at all → all ops permitted.
-    if (permissions_.empty()) {
-        EffectiveOps full;
-        full.open = full.select_ = full.update_ =
-            full.insert_ = full.delete_ = full.execute_ = true;
-        return full;
+
+    // Collect the set of principals to check: user + all their groups.
+    std::unordered_set<std::string> principals;
+    principals.insert(username);
+    auto mg = memberships_.find(username);
+    if (mg != memberships_.end())
+        for (const auto& g : mg->second)
+            principals.insert(g);
+
+    // Gather matching permission entries.
+    EffectiveOps result;
+    bool found_any = false;
+
+    for (const auto& pe : permissions_) {
+        if (pe.object_name != object_name) continue;
+        if (principals.find(pe.grantee) == principals.end()) continue;
+
+        found_any = true;
+        auto contrib = ops_from_bitmask(pe.bitmask, pe.grantee_is_group);
+        result.select_  |= contrib.select_;
+        result.update_  |= contrib.update_;
+        result.insert_  |= contrib.insert_;
+        result.delete_  |= contrib.delete_;
+        result.execute_ |= contrib.execute_;
     }
 
-    // Use cache (build lazily if needed).
-    if (perm_cache_.find(username) == perm_cache_.end())
-        build_perm_cache(username);
-
-    const auto& user_map = perm_cache_.at(username);
-    auto it = user_map.find(object_name);
-    if (it == user_map.end()) {
-        // No entry for this object → unrestricted.
-        EffectiveOps full;
-        full.open = full.select_ = full.update_ =
-            full.insert_ = full.delete_ = full.execute_ = true;
-        return full;
+    if (!found_any) {
+        // No ACL entry for this principal set → full open access.
+        result.open     = true;
+        result.select_  = true;
+        result.update_  = true;
+        result.insert_  = true;
+        result.delete_  = true;
+        result.execute_ = true;
     }
-
-    return ops_from_bitmask(it->second);
+    return result;
 }
 
 std::vector<DataDict::EffectivePermEntry>
 DataDict::get_all_effective_perms(const std::string& username) const {
-    // Ensure cache is built.
-    if (perm_cache_.find(username) == perm_cache_.end())
-        build_perm_cache(username);
 
-    // Build object_type lookup from the raw permission entries.
-    std::unordered_map<std::string, std::string> obj_type_map;
-    std::unordered_map<std::string, int>          obj_code_map;
+    // Build set of principals.
+    std::unordered_set<std::string> principals;
+    principals.insert(username);
+    auto mg = memberships_.find(username);
+    if (mg != memberships_.end())
+        for (const auto& g : mg->second)
+            principals.insert(g);
+
+    // Collect distinct objects visible to this user.
+    // object_name → accumulated EffectiveOps
+    std::unordered_map<std::string, EffectiveOps> acc;
+    std::unordered_map<std::string, std::string>  obj_type_map;
+    std::unordered_map<std::string, int>           obj_code_map;
+
     for (const auto& pe : permissions_) {
+        if (principals.find(pe.grantee) == principals.end()) continue;
+        auto& eo = acc[pe.object_name];
+        auto contrib = ops_from_bitmask(pe.bitmask, pe.grantee_is_group);
+        eo.select_  |= contrib.select_;
+        eo.update_  |= contrib.update_;
+        eo.insert_  |= contrib.insert_;
+        eo.delete_  |= contrib.delete_;
+        eo.execute_ |= contrib.execute_;
         obj_type_map[pe.object_name] = pe.object_type;
         obj_code_map[pe.object_name] = pe.object_type_code;
     }
 
-    const auto& user_map = perm_cache_.at(username);
     std::vector<EffectivePermEntry> result;
-    result.reserve(user_map.size());
-    for (const auto& kv : user_map) {
+    result.reserve(acc.size());
+    for (auto& kv : acc) {
         EffectivePermEntry e;
         e.object_name      = kv.first;
         e.object_type      = obj_type_map[kv.first];
         e.object_type_code = obj_code_map[kv.first];
         e.grantee          = username;
-        e.ops              = ops_from_bitmask(kv.second);
+        e.ops              = kv.second;
         result.push_back(std::move(e));
     }
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Legacy coarse-grained effective permission (kept for backward compat)
+// ---------------------------------------------------------------------------
+
 int DataDict::get_effective_permission(const std::string& username,
                                         const std::string& table) const {
-    // Prefer the fine-grained cache when available; fall back to table_perms_.
-    if (!permissions_.empty()) {
-        if (perm_cache_.find(username) == perm_cache_.end())
-            build_perm_cache(username);
-        const auto& user_map = perm_cache_.at(username);
-        auto it = user_map.find(table);
-        if (it == user_map.end()) return 4;   // no entry → full access
-        uint32_t bits = it->second;
-        if (bits & DD_PERM_FULL)                                   return 4;
-        if (bits & DD_PERM_DELETE)                                 return 3;
-        if (bits & (DD_PERM_UPDATE | DD_PERM_INSERT))              return 2;
-        if (bits & DD_PERM_SELECT)                                 return 1;
-        return 0;
-    }
-
-    // Legacy fallback: coarse table_perms_ map.
     auto t = table_perms_.find(table);
-    if (t == table_perms_.end()) return 4;
+    if (t == table_perms_.end()) return 4;   // no ACL → full access
+
     int eff = 0;
     auto u = t->second.find(username);
     if (u != t->second.end()) eff = u->second;
+
     auto mg = memberships_.find(username);
     if (mg != memberships_.end()) {
         for (const auto& g : mg->second) {
@@ -2490,7 +2312,7 @@ int DataDict::get_effective_permission(const std::string& username,
 }
 
 // ---------------------------------------------------------------------------
-// FIELD PROPERTIES
+// Field properties
 // ---------------------------------------------------------------------------
 
 util::Result<void>
@@ -2517,73 +2339,596 @@ DataDict::get_field_property(const std::string& table,
 }
 
 // ---------------------------------------------------------------------------
-// TRIGGERS
+// Triggers
 // ---------------------------------------------------------------------------
 
 util::Result<void> DataDict::create_trigger(const TriggerEntry& e) {
     if (e.name.empty() || e.table_alias.empty())
         return util::Error{5000, 0, "DD trigger name/table empty", ""};
     triggers_[e.table_alias + "::" + e.name] = e;
+    if (binary_format_) {
+        auto prop = join_nul({e.table_alias, std::to_string(e.event_mask),
+                               std::to_string(e.timing),
+                               std::to_string(e.priority),
+                               e.enabled ? "1" : "0",
+                               e.container, e.procedure, e.comment,
+                               std::to_string(e.options)});
+        // Find the parent table's obj_id for disambiguation.
+        uint32_t tbl_id = 0;
+        for (const auto& br : binary_recs_) {
+            if (br.active && (br.obj_type == "Table" || br.obj_type == "TableAlias") &&
+                br.obj_name == e.table_alias) {
+                tbl_id = br.obj_id; break;
+            }
+        }
+        // Mark all stale same-name records inactive before creating/updating.
+        // (Handles duplicate accumulation from prior runs with wrong parent_id.)
+        bool updated = false;
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "Trigger" && r.obj_name == e.name) {
+                if (!updated && (tbl_id == 0 || r.parent_id == tbl_id)) {
+                    // Best match: update in place and fix parent.
+                    r.property  = prop; r.prop_null = false;
+                    r.parent_id = (tbl_id != 0) ? tbl_id : r.parent_id;
+                    updated = true;
+                } else {
+                    r.active = false;  // deactivate duplicate
+                }
+            }
+        }
+        if (updated) return save();
+        BinaryRecord r;
+        r.active    = true;
+        r.obj_id    = binary_alloc_id_();
+        // Use the table's obj_id as parent so drop_trigger can find this record.
+        r.parent_id = (tbl_id != 0) ? tbl_id : binary_obj_id_of_("Database", "Database");
+        if (r.parent_id == 0) r.parent_id = 1;
+        r.obj_type  = "Trigger";
+        r.obj_name  = e.name;
+        r.property  = prop;
+        r.prop_null = false;
+        binary_recs_.push_back(std::move(r));
+    }
     return save();
 }
 
 util::Result<void> DataDict::drop_trigger(const std::string& name) {
+    // Accept composite "table::name" or plain name (fallback via find_trigger).
     auto sep = name.find("::");
+    std::string tbl_alias  = (sep != std::string::npos) ? name.substr(0, sep) : "";
+    std::string plain_name = (sep != std::string::npos) ? name.substr(sep + 2) : name;
+
+    // Resolve composite key for erase (handles plain-name callers).
     std::string erase_key = name;
     if (sep == std::string::npos) {
         const auto* ep = find_trigger(name);
         if (ep) erase_key = ep->table_alias + "::" + ep->name;
+        if (!tbl_alias.empty()); // already "" when plain name
+        else if (ep) tbl_alias = ep->table_alias;
     }
     triggers_.erase(erase_key);
+    if (binary_format_) {
+        // Deactivate ALL trigger records matching this name (any parent_id).
+        // This cleans up duplicates that may have accumulated from prior runs.
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "Trigger" && r.obj_name == plain_name)
+                r.active = false;
+        }
+    }
     return save();
 }
 
 // ---------------------------------------------------------------------------
-// STORED PROCEDURES
+// Stored procedures
 // ---------------------------------------------------------------------------
 
 util::Result<void> DataDict::create_proc(const ProcEntry& e) {
     if (e.name.empty())
         return util::Error{5000, 0, "DD proc name empty", ""};
     procs_[e.name] = e;
+    if (binary_format_) {
+        auto prop = join_nul({e.container, e.procedure,
+                               e.input_params, e.output_params, e.comment});
+        for (auto& r : binary_recs_) {
+            if (r.active && (r.obj_type == "Procedure" || r.obj_type == "StoredProc") &&
+                r.obj_name == e.name) {
+                r.property = prop; r.prop_null = false;
+                return save();
+            }
+        }
+        BinaryRecord r;
+        r.active    = true;
+        r.obj_id    = binary_alloc_id_();
+        r.parent_id = binary_obj_id_of_("Database", "Database");
+        if (r.parent_id == 0) r.parent_id = 1;
+        r.obj_type  = "StoredProc";
+        r.obj_name  = e.name;
+        r.property  = prop;
+        r.prop_null = false;
+        binary_recs_.push_back(std::move(r));
+    }
     return save();
 }
 
 util::Result<void> DataDict::drop_proc(const std::string& name) {
     procs_.erase(name);
+    if (binary_format_) {
+        for (auto& r : binary_recs_) {
+            if (r.active && (r.obj_type == "Procedure" || r.obj_type == "StoredProc") &&
+                r.obj_name == name) {
+                r.active = false; break;
+            }
+        }
+    }
     return save();
 }
 
 // ---------------------------------------------------------------------------
-// FUNCTIONS
+// Functions
 // ---------------------------------------------------------------------------
 
 util::Result<void> DataDict::create_function(const FunctionEntry& e) {
     if (e.name.empty())
         return util::Error{5000, 0, "DD function name empty", ""};
     functions_[e.name] = e;
+    if (binary_format_) {
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "Function" && r.obj_name == e.name)
+                return save();
+        }
+        // New function record — preamble = empty (prop_plen=0).
+        BinaryRecord r;
+        r.active    = true;
+        r.obj_id    = binary_alloc_id_();
+        r.parent_id = binary_obj_id_of_("Database", "Database");
+        if (r.parent_id == 0) r.parent_id = 1;
+        r.obj_type  = "Function";
+        r.obj_name  = e.name;
+        r.property  = "";
+        r.prop_null = false;
+        r.prop_plen = 0;
+        binary_recs_.push_back(std::move(r));
+    }
     return save();
 }
 
 util::Result<void> DataDict::drop_function(const std::string& name) {
     functions_.erase(name);
+    if (binary_format_) {
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "Function" && r.obj_name == name) {
+                r.active = false; break;
+            }
+        }
+    }
     return save();
 }
 
 // ---------------------------------------------------------------------------
-// VIEWS
+// Views
 // ---------------------------------------------------------------------------
 
 util::Result<void> DataDict::create_view(const ViewEntry& e) {
     if (e.name.empty())
         return util::Error{5000, 0, "DD view name empty", ""};
     views_[e.name] = e;
+    if (binary_format_) {
+        auto prop = join_nul({e.comment, e.sql});
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "View" && r.obj_name == e.name) {
+                r.property = prop; r.prop_null = false;
+                return save();
+            }
+        }
+        BinaryRecord r;
+        r.active    = true;
+        r.obj_id    = binary_alloc_id_();
+        r.parent_id = binary_obj_id_of_("Database", "Database");
+        if (r.parent_id == 0) r.parent_id = 1;
+        r.obj_type  = "View";
+        r.obj_name  = e.name;
+        r.property  = prop;
+        r.prop_null = false;
+        binary_recs_.push_back(std::move(r));
+    }
     return save();
 }
 
 util::Result<void> DataDict::drop_view(const std::string& name) {
     views_.erase(name);
+    if (binary_format_) {
+        for (auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "View" && r.obj_name == name) {
+                r.active = false; break;
+            }
+        }
+    }
     return save();
+}
+
+// ---------------------------------------------------------------------------
+// Binary format helpers
+// ---------------------------------------------------------------------------
+
+std::uint32_t DataDict::binary_alloc_id_() {
+    uint32_t id = le32(binary_hdr_, 0x50);
+    put_le32(binary_hdr_, 0x50, id + 1);
+    return id;
+}
+
+std::uint32_t DataDict::binary_obj_id_of_(const std::string& obj_type,
+                                           const std::string& name) const {
+    for (const auto& r : binary_recs_) {
+        if (r.active && r.obj_type == obj_type && r.obj_name == name)
+            return r.obj_id;
+    }
+    return 0;
+}
+
+std::string DataDict::serialize_binary_rec_(const BinaryRecord& r,
+                                             uint32_t rec_len) {
+    // Property VarChar field is always 275 bytes (2-byte prefix + 273 data).
+    const uint32_t prop_field_len = 275;
+    std::string rec(rec_len, '\0');
+
+    rec[0] = static_cast<char>(r.active ? 0x04u : 0x05u);
+    // bytes 1-4: null bitmap (all zero — no nullable fields in this format)
+    put_le32(rec, 5, r.obj_id);
+    put_le32(rec, 9, r.parent_id);
+
+    // Object Type: CHAR(10) space-padded
+    {
+        std::size_t n = std::min(r.obj_type.size(), std::size_t{10});
+        for (std::size_t i = 0; i < 10; ++i)
+            rec[13 + i] = (i < n) ? r.obj_type[i] : ' ';
+    }
+    // Object Name: CHAR(200) space-padded
+    {
+        std::size_t n = std::min(r.obj_name.size(), std::size_t{200});
+        for (std::size_t i = 0; i < 200; ++i)
+            rec[23 + i] = (i < n) ? r.obj_name[i] : ' ';
+    }
+    // Property VarChar — prop_field_len bytes total at offset 223.
+    if (r.prop_null) {
+        rec[223] = static_cast<char>(0xFFu);
+        rec[224] = static_cast<char>(0xFFu);
+    } else {
+        std::size_t max_data = prop_field_len - 2;
+        std::size_t data_len = std::min(r.property.size(), max_data);
+        // prop_plen overrides the plen field (used for Function lstr format where plen
+        // = preamble size, not full property area size).
+        uint16_t plen_field = (r.prop_plen > 0) ? r.prop_plen
+                                                 : static_cast<uint16_t>(data_len);
+        put_le16(rec, 223, plen_field);
+        for (std::size_t i = 0; i < data_len; ++i)
+            rec[225 + i] = r.property[i];
+    }
+    // More Property (9 bytes at 498)
+    for (std::size_t j = 0; j < 9; ++j)
+        rec[498u + j] = static_cast<char>(r.more_property[j]);
+    put_le32(rec, 507, r.info1);
+    put_le32(rec, 511, r.info2);
+    // Comment (9 bytes at 515)
+    for (std::size_t j = 0; j < 9; ++j)
+        rec[515u + j] = static_cast<char>(r.comment[j]);
+
+    return rec;
+}
+
+util::Result<void> DataDict::save_add_binary_() {
+    // Read companion .am memo file for StoredProc body/params overflow.
+    std::string am_path;
+    {
+        auto dot = path_.rfind('.');
+        am_path = (dot != std::string::npos)
+                ? path_.substr(0, dot) + ".am"
+                : path_ + ".am";
+    }
+    std::string am_buf;
+    {
+        auto amf = platform::File::open(am_path, platform::OpenMode::ReadOnly);
+        if (amf) {
+            auto& amfile = amf.value();
+            auto sz = amfile.size();
+            if (sz && sz.value() > 0) {
+                am_buf.resize(static_cast<std::size_t>(sz.value()));
+                auto rr = amfile.read_at(0, am_buf.data(), am_buf.size());
+                if (rr && rr.value() < am_buf.size()) am_buf.resize(rr.value());
+            }
+        }
+    }
+    bool am_dirty = false;
+
+    // Build obj_id → obj_name map for Table records (used for trigger disambiguation).
+    std::unordered_map<uint32_t, std::string> rec_id_to_name;
+    for (const auto& br : binary_recs_) {
+        if (br.active && (br.obj_type == "Table" || br.obj_type == "TableAlias" ||
+                          br.obj_type == "Database"))
+            rec_id_to_name[br.obj_id] = br.obj_name;
+    }
+
+    // Regenerate property fields for mutable object types so that
+    // AdsDDSet*Property mutations are reflected even without re-creating.
+    for (auto& r : binary_recs_) {
+        if (!r.active) continue;
+        if (r.obj_type == "Table") {
+            auto tp_it = table_props_.find(r.obj_name);
+            auto tbl_it = tables_.find(r.obj_name);
+            if (tp_it != table_props_.end() && tbl_it != tables_.end()) {
+                const auto& tp = tp_it->second;
+                if (!tp.primary_key.empty() || !tp.default_index.empty()) {
+                    r.property  = join_nul({tbl_it->second, tp.primary_key,
+                                            tp.default_index, tp.comment});
+                    r.prop_null = false;
+                }
+            }
+        } else if (r.obj_type == "Procedure" || r.obj_type == "StoredProc") {
+            auto it = procs_.find(r.obj_name);
+            if (it != procs_.end()) {
+                const auto& e = it->second;
+                // OpenADS proprietary format: full procedure as JSON in .am.
+                std::string json = proc_to_json(e);
+                auto res = put_am_block(am_buf, r.more_property, json);
+                set_more_prop_(r.more_property, res.first, res.second);
+                am_dirty = true;
+                r.property  = std::string(1, '\x09');
+                r.prop_null = false;
+            }
+        } else if (r.obj_type == "Function") {
+            auto it = functions_.find(r.obj_name);
+            if (it != functions_.end()) {
+                const auto& e = it->second;
+                // OpenADS proprietary format: full function as JSON in .am.
+                std::string json = func_to_json(e);
+                auto res = put_am_block(am_buf, r.more_property, json);
+                set_more_prop_(r.more_property, res.first, res.second);
+                am_dirty = true;
+                r.property  = std::string(1, '\x0A');
+                r.prop_null = false;
+            }
+        } else if (r.obj_type == "Trigger") {
+            // Resolve parent table alias to form composite key.
+            std::string tbl_alias;
+            {
+                auto pit = rec_id_to_name.find(r.parent_id);
+                if (pit != rec_id_to_name.end()) tbl_alias = pit->second;
+            }
+            std::string comp_key = tbl_alias.empty() ? r.obj_name
+                                                     : tbl_alias + "::" + r.obj_name;
+            auto it = triggers_.find(comp_key);
+            if (it != triggers_.end()) {
+                const auto& e = it->second;
+                // OpenADS proprietary format: full trigger data as JSON in .am.
+                // Sentinel byte 0x08 in the inline property signals this to the reader.
+                std::string json = trigger_to_json(e);
+                auto res = put_am_block(am_buf, r.more_property, json);
+                set_more_prop_(r.more_property, res.first, res.second);
+                am_dirty = true;
+                r.property  = std::string(1, '\x08');
+                r.prop_null = false;
+            }
+        } else if (r.obj_type == "Relation") {
+            auto it = ri_.find(r.obj_name);
+            if (it != ri_.end()) {
+                const auto& e = it->second;
+                r.property  = join_nul({e.parent, e.child, e.parent_tag, e.child_tag,
+                                         e.update_opt, e.delete_opt, e.fail_table});
+                r.prop_null = false;
+            }
+        } else if (r.obj_type == "View") {
+            auto it = views_.find(r.obj_name);
+            if (it != views_.end()) {
+                const auto& e = it->second;
+                // OpenADS proprietary format: full view as JSON in .am.
+                std::string json = view_to_json(e);
+                auto res = put_am_block(am_buf, r.more_property, json);
+                set_more_prop_(r.more_property, res.first, res.second);
+                am_dirty = true;
+                r.property  = std::string(1, '\x0B');
+                r.prop_null = false;
+            }
+        }
+    }
+
+    auto total = static_cast<uint32_t>(binary_recs_.size());
+    put_le32(binary_hdr_, 0x18, total);
+
+    std::string out;
+    out.reserve(binary_hdr_len_ + total * binary_rec_len_);
+    out.append(binary_hdr_);
+    for (const auto& r : binary_recs_)
+        out.append(serialize_binary_rec_(r, binary_rec_len_));
+
+    auto fres = platform::File::open(path_, platform::OpenMode::CreateRW);
+    if (!fres) return fres.error();
+    auto file = std::move(fres).value();
+    auto wrote = file.write_at(0, out.data(), out.size());
+    if (!wrote) return wrote.error();
+    if (wrote.value() != out.size())
+        return util::Error{5000, 0, "short write on binary .add", path_};
+    if (auto s = file.sync(); !s) return s;
+
+    // Write updated .am file when StoredProc body/params were serialised.
+    if (am_dirty && !am_buf.empty()) {
+        auto amf = platform::File::open(am_path, platform::OpenMode::CreateRW);
+        if (!amf) return amf.error();
+        auto& amfile = amf.value();
+        auto amwrote = amfile.write_at(0, am_buf.data(), am_buf.size());
+        if (!amwrote) return amwrote.error();
+        if (amwrote.value() != am_buf.size())
+            return util::Error{5000, 0, "short write on .am memo file", am_path};
+        if (auto s = amfile.sync(); !s) return s;
+    }
+
+    return {};
+}
+
+util::Result<void> DataDict::create_group(const std::string& group) {
+    if (group.empty())
+        return util::Error{5000, 0, "DD group name empty", ""};
+    groups_.insert(group);
+    if (binary_format_) {
+        for (const auto& r : binary_recs_) {
+            if (r.active && r.obj_type == "Group" && r.obj_name == group)
+                return save();
+        }
+        BinaryRecord r;
+        r.active    = true;
+        r.obj_id    = binary_alloc_id_();
+        r.parent_id = binary_obj_id_of_("Database", "Database");
+        if (r.parent_id == 0) r.parent_id = 1;
+        r.obj_type  = "Group";
+        r.obj_name  = group;
+        r.prop_null = true;
+        r.info1     = 0;
+        r.info2     = 0;
+        binary_recs_.push_back(std::move(r));
+    }
+    return save();
+}
+
+util::Result<void> DataDict::delete_group(const std::string& group) {
+    groups_.erase(group);
+    for (auto it = memberships_.begin(); it != memberships_.end(); ) {
+        it->second.erase(group);
+        if (it->second.empty()) it = memberships_.erase(it);
+        else ++it;
+    }
+    if (binary_format_) {
+        uint32_t group_id = binary_obj_id_of_("Group", group);
+        for (auto& r : binary_recs_) {
+            if (!r.active) continue;
+            if (r.obj_type == "Group" && r.obj_name == group) {
+                r.active = false;
+            } else if (group_id != 0 && r.obj_type == "Permission" &&
+                       r.info1 == group_id) {
+                r.active = false;
+            }
+        }
+    }
+    return save();
+}
+
+// ---------------------------------------------------------------------------
+// save (text format)
+// ---------------------------------------------------------------------------
+
+util::Result<void> DataDict::save() {
+    if (binary_format_) return save_add_binary_();
+
+    auto fres = platform::File::open(path_, platform::OpenMode::CreateRW);
+    if (!fres) return fres.error();
+    auto file = std::move(fres).value();
+
+    std::string out = "# OpenADS Data Dictionary v1\n";
+
+    auto sorted_keys = [](const auto& m) {
+        std::vector<std::string> ks;
+        ks.reserve(m.size());
+        for (const auto& kv : m) ks.push_back(kv.first);
+        std::sort(ks.begin(), ks.end());
+        return ks;
+    };
+
+    for (auto& a : sorted_keys(tables_)) {
+        out += "TABLE " + a + "=" + tables_.at(a) + "\n";
+    }
+    for (auto& e : indexes_) {
+        out += "INDEX " + e.table_alias + "=" + e.index_path;
+        if (!e.comment.empty()) { out += "\t"; out += e.comment; }
+        out += "\n";
+    }
+    {
+        std::vector<std::string> us(users_.begin(), users_.end());
+        std::sort(us.begin(), us.end());
+        for (auto& u : us) out += "USER " + u + "\n";
+    }
+    {
+        std::vector<std::string> gs(groups_.begin(), groups_.end());
+        std::sort(gs.begin(), gs.end());
+        for (auto& g : gs) out += "GROUP " + g + "\n";
+    }
+    for (auto& u : sorted_keys(memberships_)) {
+        std::vector<std::string> gs(memberships_.at(u).begin(),
+                                    memberships_.at(u).end());
+        std::sort(gs.begin(), gs.end());
+        for (auto& g : gs) out += "MEMBER " + u + "=" + g + "\n";
+    }
+    for (auto& a : sorted_keys(links_)) {
+        const auto& e = links_.at(a);
+        out += "LINK " + a + "=" + e.path;
+        if (!e.user.empty() || !e.pwd.empty()) {
+            out += "\t"; out += e.user;
+        }
+        if (!e.pwd.empty()) { out += "\t"; out += e.pwd; }
+        out += "\n";
+    }
+    for (auto& n : sorted_keys(ri_)) {
+        const auto& e = ri_.at(n);
+        out += "RI " + n + "=" + e.parent + ";" + e.child + ";" +
+               e.parent_tag + ";" + e.child_tag + ";" +
+               e.update_opt + ";" + e.delete_opt + ";" +
+               e.fail_table + "\n";
+    }
+    for (auto& k : sorted_keys(db_props_)) {
+        out += "DBPROP " + k + "=" + db_props_.at(k) + "\n";
+    }
+    for (auto& u : sorted_keys(user_props_)) {
+        std::vector<std::string> ks;
+        for (const auto& [k, _] : user_props_.at(u)) ks.push_back(k);
+        std::sort(ks.begin(), ks.end());
+        for (auto& k : ks) {
+            out += "USERPROP " + u + ";" + k + "=" +
+                   user_props_.at(u).at(k) + "\n";
+        }
+    }
+    for (auto& t : sorted_keys(table_perms_)) {
+        std::vector<std::string> ugs;
+        for (const auto& [ug, _] : table_perms_.at(t)) ugs.push_back(ug);
+        std::sort(ugs.begin(), ugs.end());
+        for (auto& ug : ugs) {
+            out += "TABLEPERM " + t + ";" + ug + "=" +
+                   std::to_string(table_perms_.at(t).at(ug)) + "\n";
+        }
+    }
+    for (auto& tbl : sorted_keys(field_props_)) {
+        std::vector<std::string> flds;
+        for (const auto& [f, _] : field_props_.at(tbl)) flds.push_back(f);
+        std::sort(flds.begin(), flds.end());
+        for (auto& fld : flds) {
+            std::vector<std::string> ks;
+            for (const auto& [k, _] : field_props_.at(tbl).at(fld)) ks.push_back(k);
+            std::sort(ks.begin(), ks.end());
+            for (auto& k : ks) {
+                out += "FIELDPROP " + tbl + ";" + fld + ";" + k + "=" +
+                       field_props_.at(tbl).at(fld).at(k) + "\n";
+            }
+        }
+    }
+    for (auto& n : sorted_keys(triggers_)) {
+        const auto& e = triggers_.at(n);
+        out += "TRIGGER " + e.name + "=" + e.table_alias + ";" +
+               std::to_string(e.event_mask) + ";" +
+               std::to_string(e.timing) + ";" +
+               std::to_string(e.priority) + ";" +
+               (e.enabled ? "1" : "0") + ";" +
+               e.container + ";" + e.procedure + ";" + e.comment + ";" +
+               std::to_string(e.options) + "\n";
+    }
+    for (auto& n : sorted_keys(procs_)) {
+        const auto& e = procs_.at(n);
+        out += "PROC " + n + "=" + e.container + ";" + e.procedure + ";" +
+               e.input_params + ";" + e.output_params + ";" + e.comment + "\n";
+    }
+    for (auto& n : sorted_keys(views_)) {
+        const auto& e = views_.at(n);
+        out += "VIEW " + n + "=" + e.comment + ";" + e.sql + "\n";
+    }
+
+    auto wrote = file.write_at(0, out.data(), out.size());
+    if (!wrote) return wrote.error();
+    if (auto s = file.sync(); !s) return s.error();
+    return {};
 }
 
 } // namespace openads::engine

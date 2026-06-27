@@ -16,14 +16,11 @@ enum class IndexOpenMode { ReadOnly, Shared, Exclusive };
 enum class SeekHit { Exact, AfterKey, BeforeBegin, AfterEnd };
 
 // How key bytes are encoded on disk. Text = raw/space-padded character
-// bytes (default; ADI and character CDX/NTX). FoxNumeric = the 8-byte
+// bytes (default; NTX, ADI, and character CDX). FoxNumeric = the 8-byte
 // order-preserving encoding FoxPro/Harbour use for numeric and date CDX
-// keys. NtxNumeric = the native DBFNTX numeric form: a zero-padded
-// fixed-width magnitude, with every byte of a negative key complemented
-// as (0x5c - byte) so negatives sort before positives. The engine builds
-// the bytes; the B+tree itself only ever compares keys as opaque bytes,
-// so this lives at the ABI/engine boundary.
-enum class KeyEncoding { Text, FoxNumeric, NtxNumeric };
+// keys. The engine builds the bytes; the B+tree itself only ever compares
+// keys as opaque bytes, so this lives at the ABI/engine boundary.
+enum class KeyEncoding { Text, FoxNumeric };
 
 struct SeekOutcome {
     SeekHit       hit          = SeekHit::AfterEnd;
@@ -62,11 +59,6 @@ public:
     // this when building keys (see Table::compute_index_key_).
     virtual KeyEncoding key_encoding() const { return KeyEncoding::Text; }
     virtual void set_key_encoding(KeyEncoding) {}
-
-    // Decimal places of a numeric key (NtxNumeric). Default 0; NtxIndex
-    // overrides to return the count pinned from the field descriptor. The
-    // engine needs it to format the same zero-padded key the index stored.
-    virtual std::uint16_t key_decimals() const { return 0; }
 
     virtual util::Result<void> insert(std::uint32_t recno,
                                       const std::string& key) = 0;

@@ -36,10 +36,10 @@ struct SelectStmt;
 
 struct WhereCmp {
     std::string column;
-    // ADS dialect — table alias qualifier on the LHS column (`h.tx_date`
-    // → column="tx_date", column_alias="h"). Empty when unqualified.
+    // ADS dialect — table alias qualifier on the LHS column (`num.dfectratra`
+    // → column="dfectratra", column_alias="num"). Empty when unqualified.
     // Required by the N-way join executor to disambiguate same-named columns
-    // across the joined tables (e.g. h.tx_date vs d.tx_date).
+    // across the joined tables (e.g. num.dfectratra vs mov.dfectratra).
     std::string column_alias;
     WhereOp     op = WhereOp::Eq;
     WhereFn     lhs_fn = WhereFn::None;   // ADS UPPER()/LOWER() on the LHS
@@ -57,8 +57,8 @@ struct WhereCmp {
     bool        is_outer_ref = false;
     std::string outer_column;
     // ADS dialect — alias qualifier of the RHS outer/join column
-    // (`h.doctype_id = d.doctype_id` → outer_column="doctype_id",
-    // outer_column_alias="d"). Empty when unqualified.
+    // (`num.ccodigocon = mov.ccodigocon` → outer_column="ccodigocon",
+    // outer_column_alias="mov"). Empty when unqualified.
     std::string outer_column_alias;
     // M10.33 — BETWEEN's upper bound (`<col> BETWEEN lit1 AND lit2`).
     // When op == WhereOp::Between, `literal`/`number` hold the lower
