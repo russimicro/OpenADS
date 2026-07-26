@@ -62,6 +62,7 @@
 #include "drivers/cdx/cdx_driver.h"
 #include "drivers/cdx/cdx_index.h"
 #include "drivers/adi/adi_index.h"
+#include "drivers/adt/adt_driver.h"
 #include "drivers/adm/adm_memo.h"
 #include "drivers/fpt/fpt_memo.h"
 #include "platform/proc.h"
@@ -5520,6 +5521,21 @@ UNSIGNED32 AdsAppendRecord(ADSHANDLE hTable) {
     return ok();
 }
 
+// Per-record fsync on AdsWriteRecord (Table::flush -> driver fsync + per-index
+// fsync) measured ~900 us/record; deferring it -> ~50 us (19x). The write still
+// reaches the OS buffer immediately (visible to same-machine readers); the fsync
+// happens on close / commit / AdsFlushFileBuffers / AdsWriteAllRecords, which is
+// exactly the durability model classic DBFCDX and ADS-SAP use. Opt-in via env
+// OPENADS_DEFER_WRITE_FLUSH=1 so the durability trade-off is an explicit choice
+// (a crash can lose writes since the last sync point). Cached: hit on every write.
+bool defer_write_flush_enabled() {
+    static const bool v = [] {
+        const char* e = std::getenv("OPENADS_DEFER_WRITE_FLUSH");
+        return e != nullptr && e[0] == '1';
+    }();
+    return v;
+}
+
 UNSIGNED32 AdsWriteRecord(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         rt->row_valid = false;                      // M12.17 cache invalidation
@@ -5566,7 +5582,7 @@ UNSIGNED32 AdsWriteRecord(ADSHANDLE hTable) {
         }
     }
 
-    if (!t->deferred_flush()) {
+    if (!t->deferred_flush() && !defer_write_flush_enabled()) {
         auto r = t->flush();
         if (!r) return fail(r.error());
     }
@@ -6359,6 +6375,37 @@ make_index_for(const std::string& path) {
     return std::make_unique<openads::drivers::ntx::NtxIndex>();
 }
 
+// EXPERIMENTAL (opt-in, default OFF): route index ops on ADT tables through the
+// CdxIndex engine instead of the AdiIndex driver. The AdiIndex driver indexes by
+// FIELD only (no compound/computed/FOR expressions, 2-byte recno -> 65535 cap),
+// which the ERP's indexes need. CdxIndex is data-format-agnostic (stores the
+// evaluated key + 32-bit recno) so it works over an ADT table just as over DBF.
+// The on-disk index file is then CDX-format (even if named .adi) -> only enable
+// when .ADI files are NOT interchanged with real Advantage (x86). Gate: env
+// OPENADS_ADT_CDX_INDEX=1. See C:\OpenADS\PROMPT_ADI_DRIVER_REWRITE_PLAN.md.
+bool adt_cdx_index_enabled() {
+    const char* e = std::getenv("OPENADS_ADT_CDX_INDEX");
+    return e != nullptr && e[0] == '1';
+}
+
+// A .adi bag written by the CdxIndex reroute carries the Harbour CDX structure
+// signature "RCHB" at byte offset 20 (see cdx_index.cpp); a native AdiIndex bag
+// does not. Detecting it lets the OPEN path pick the right engine REGARDLESS of
+// OPENADS_ADT_CDX_INDEX. Without this, a .adi built CDX-format (reroute on at
+// reindex) but opened with the env flag absent routes to the native AdiIndex
+// reader, which can't parse it -> 5004 -> the table opens with 0 indexes and
+// the first DBSETORDER/SEEK fails. Format-driven open removes that fragility:
+// the engine follows what is actually on disk, so the flag can never be "missing
+// at open time". Native bags keep using AdiIndex.
+bool adi_bag_is_cdx_format(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    char hdr[24] = {0};
+    f.read(hdr, sizeof(hdr));
+    if (f.gcount() < 24) return false;
+    return hdr[20] == 'R' && hdr[21] == 'C' && hdr[22] == 'H' && hdr[23] == 'B';
+}
+
 } // namespace
 
 } // extern "C++"
@@ -6507,7 +6554,16 @@ UNSIGNED32 AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     // tag, which open() reports via name().
     std::vector<std::string> tags;
     bool is_adi = path_ends_with_ci(path, ".adi");
-    if (path_ends_with_ci(path, ".cdx")) {
+    // Open a .adi bag of an ADT table via the CdxIndex engine when the env opt-in
+    // is set OR the bag on disk is already CDX-format (reroute-written). The
+    // format check makes OPEN robust to a missing env flag: a CDX-format .adi
+    // always opens via CdxIndex, a native bag via AdiIndex. Mirrors the
+    // create-side routing in AdsCreateIndex61.
+    const bool is_adt_tbl =
+        (dynamic_cast<openads::drivers::adt::AdtDriver*>(t->driver()) != nullptr);
+    const bool adt_to_cdx = is_adi && is_adt_tbl &&
+        (adt_cdx_index_enabled() || adi_bag_is_cdx_format(path));
+    if (path_ends_with_ci(path, ".cdx") || adt_to_cdx) {
         auto r = openads::drivers::cdx::CdxIndex::list_tags(path);
         if (!r) return fail(r.error());
         tags = std::move(r).value();
@@ -6551,7 +6607,7 @@ UNSIGNED32 AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     for (const auto& name : tags) {
         if (count >= cap) break;
         std::unique_ptr<openads::drivers::IIndex> sub;
-        if (is_adi) {
+        if (is_adi && !adt_to_cdx) {
             auto idx = std::make_unique<openads::drivers::adi::AdiIndex>();
             if (auto r = idx->open_named(path,
                               openads::drivers::IndexOpenMode::Shared,
@@ -6789,7 +6845,15 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
         : std::string{};
 
     namespace fs = std::filesystem;
-    const bool is_adt_table = path_ends_with_ci(t->path(), ".adt");
+    // Detect ADT table either by .adt extension (standard) or by the
+    // actual driver in use. This is required for Russoft convention
+    // where ADT data files keep .DAT extension (ExtFile='.DAT') even
+    // when opened via ADS_ADT.
+    bool is_adt_table = path_ends_with_ci(t->path(), ".adt");
+    if (!is_adt_table) {
+        if (dynamic_cast<openads::drivers::adt::AdtDriver*>(t->driver()) != nullptr)
+            is_adt_table = true;
+    }
     const char* default_ext = is_adt_table ? ".adi" : ".cdx";
     fs::path p;
     if (bag.empty()) {
@@ -6806,6 +6870,14 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
     }
     bool is_cdx = path_ends_with_ci(p.string(), ".cdx");
     bool is_adi = path_ends_with_ci(p.string(), ".adi");
+    // ADT table + .adi bag -> route to the CdxIndex engine when the env opt-in is
+    // set OR the bag already exists in CDX-format (so adding a tag to a
+    // reroute-built bag stays CDX even with the flag absent — never mix formats
+    // in one bag). A fresh bag (ERP ZFERASEs the .adi before reindex) has no file
+    // -> the env flag decides the format to write.
+    const bool adt_to_cdx = is_adi && is_adt_table &&
+        (adt_cdx_index_enabled() ||
+         (std::filesystem::exists(p) && adi_bag_is_cdx_format(p.string())));
 
     // ACE AdsCreateIndex* option bits (include/openads/ace.h, values
     // verified against the rddads contrib):
@@ -6854,7 +6926,7 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
     // STR()/character expressions stay text. (Date deferred — DTOS-style
     // text indexes already interop.)
     bool cdx_numeric_key = false;
-    if (is_cdx) {
+    if (is_cdx || adt_to_cdx) {
         const std::string bare = openads::engine::strip_alias_qualifiers(expr);
         std::int32_t fi = t->field_index(bare);
         if (fi >= 0) {
@@ -6897,45 +6969,72 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
         exists = (is_cdx || is_adi) && fs::exists(p, ec);
     }
 
-    if (is_adi && is_adt_table) {
-        // ADT tables use a single .adi bag; each tag indexes one field.
+    if (is_adi && is_adt_table && !adt_to_cdx) {
+        // ADT tables use a single .adi bag. Prefer bare field, but allow
+        // compound expressions (Russoft INDEX ON fld1+fld2 for .ADI) by
+        // falling back to first field for tag metadata. Keys are built from
+        // the full evaluated expr at population time.
         const std::string bare = openads::engine::strip_alias_qualifiers(expr);
         std::int32_t fidx = t->field_index(bare);
+        const bool is_compound = (fidx < 0);  // computed / multi-field expression
         if (fidx < 0) {
-            return fail(openads::AE_COLUMN_NOT_FOUND,
-                        "ADI index expression must be a bare field name");
+            fidx = 0;  // fallback for compound expr
         }
         if (fidx + 1 > 255) {
             return fail(openads::AE_INTERNAL_ERROR,
                         "ADI index does not support field numbers greater than 255");
         }
         const auto& fd = t->field_descriptor(static_cast<std::uint16_t>(fidx));
+        const std::uint16_t adt_t = static_cast<std::uint16_t>(
+            static_cast<unsigned char>(fd.raw_type));
+        const bool is_char_field =
+            adt_t == openads::drivers::adi::ADT_TYPE_CHAR ||
+            adt_t == openads::drivers::adi::ADT_TYPE_CICHAR;
+        // The v2 opaque-key leaf (full key stored, memcmp-ordered) is correct for
+        // char fields and ANY computed/compound expression — exactly what the ERP
+        // uses (STR()/DTOS()/concat → character keys). A BARE numeric/date field
+        // keeps the legacy numeric ADI leaf (sign-flipped float keys) so the
+        // existing packed-key seeks keep working.
+        const bool use_v2 = is_char_field || is_compound;
         openads::drivers::adi::AdiIndex::CreateParams cp{};
         cp.field_num   = static_cast<std::uint8_t>(fidx + 1);
         cp.field_name  = fd.name;
-        cp.adt_type    = static_cast<std::uint16_t>(
-            static_cast<unsigned char>(fd.raw_type));
+        cp.adt_type    = adt_t;
         cp.fld_length  = fd.length;
+        cp.record_offset = fd.record_offset;
         cp.adt_hdr_len = t->driver()->header_length();
         cp.adt_rec_len = t->driver()->record_length();
         cp.unique      = unique;
-
-        const bool is_char_key =
-            cp.adt_type == openads::drivers::adi::ADT_TYPE_CHAR ||
-            cp.adt_type == openads::drivers::adi::ADT_TYPE_CICHAR;
-        klen = is_char_key ? fd.length : 8;
+        cp.adt_path    = t->path();  // important for .DAT + ADS_ADT case (not .adt)
+        if (use_v2) {
+            // identity by NAME + persisted expression/FOR + full opaque key
+            // (klen stays the full evaluated-expression length; the build loop
+            // below evaluates the whole expression).
+            cp.tag_name    = tag;
+            cp.key_expr    = expr;
+            cp.for_expr    = for_expr;
+            cp.key_len     = static_cast<std::uint16_t>(klen);
+            cp.descending  = descend;
+        } else {
+            klen = 8;  // bare numeric/date → legacy numeric ADI leaf geometry
+        }
 
         if (exists) {
-            auto tags = openads::drivers::adi::AdiIndex::list_tags(p.string());
+            // v2 identity is the TAG name (list_tags returns tag names now);
+            // legacy callers without a tag_name fall back to the field name.
+            const std::string ident =
+                cp.tag_name.empty() ? fd.name : cp.tag_name;
+            auto tags = openads::drivers::adi::AdiIndex::list_tags(
+                p.string(), t->path());
             bool have_tag = false;
             if (tags) {
                 for (const auto& tn : tags.value()) {
-                    if (tn.size() == fd.name.size()) {
+                    if (tn.size() == ident.size()) {
                         bool eq = true;
                         for (std::size_t i = 0; i < tn.size(); ++i) {
                             if (std::tolower(static_cast<unsigned char>(tn[i])) !=
                                 std::tolower(static_cast<unsigned char>(
-                                    fd.name[i]))) {
+                                    ident[i]))) {
                                 eq = false;
                                 break;
                             }
@@ -6948,7 +7047,7 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
                 openads::drivers::adi::AdiIndex existing;
                 auto reopen = existing.open_named(
                     p.string(), openads::drivers::IndexOpenMode::Shared,
-                    fd.name);
+                    ident, t->path());
                 if (!reopen) return fail(reopen.error());
                 if (auto cl = existing.clear_data(); !cl) return fail(cl.error());
                 idx_owner = std::make_unique<
@@ -6967,7 +7066,7 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
             idx_owner = std::make_unique<openads::drivers::adi::AdiIndex>(
                 std::move(created).value());
         }
-    } else if (is_cdx && exists) {
+    } else if ((is_cdx || adt_to_cdx) && exists) {
         // Harbour rddads / Clipper semantics: re-creating an
         // existing tag is a silent overwrite, not an error. If the
         // tag already exists, open it and clear its B+tree so the
@@ -6998,7 +7097,7 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
             idx_owner = std::make_unique<openads::drivers::cdx::CdxIndex>(
                 std::move(added).value());
         }
-    } else if (is_cdx) {
+    } else if (is_cdx || adt_to_cdx) {
         auto created = openads::drivers::cdx::CdxIndex::create(
             p.string(), tag, expr, klen, unique, descend);
         if (!created) return fail(created.error());
@@ -7026,11 +7125,12 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
     // instead of record-by-record top-down insertion. Each page is encoded
     // once rather than decoded+re-encoded on every key, ~10x faster on a
     // full CREATE INDEX / REINDEX. NTX keeps the incremental path.
-    openads::drivers::cdx::CdxIndex* cdx_bulk =
-        is_cdx ? static_cast<openads::drivers::cdx::CdxIndex*>(idx_owner.get())
-               : nullptr;
+    // CDX and the v2 ADI leaf both implement build_bulk; NTX falls back to the
+    // per-record default. (adt_to_cdx implies is_adi; idx_owner->build_bulk()
+    // dispatches to the right engine.)
+    const bool use_bulk = is_cdx || is_adi;
     std::vector<std::pair<std::string, std::uint32_t>> bulk_keys;
-    if (cdx_bulk) bulk_keys.reserve(rec_count);
+    if (use_bulk) bulk_keys.reserve(rec_count);
     for (std::uint32_t r = 1; r <= rec_count; ++r) {
         if (auto g = t->goto_record_for_build(r); !g) return fail(g.error());
         // DBFCDX inserts deleted rows too — the index is a logical
@@ -7053,14 +7153,14 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
             if (!k) return fail(k.error());
             kbytes = std::move(k).value();
         }
-        if (cdx_bulk) {
+        if (use_bulk) {
             bulk_keys.emplace_back(std::move(kbytes), r);
         } else if (auto ins = idx_owner->insert(r, kbytes); !ins) {
             return fail(ins.error());
         }
     }
-    if (cdx_bulk) {
-        if (auto b = cdx_bulk->build_bulk(std::move(bulk_keys)); !b)
+    if (use_bulk) {
+        if (auto b = idx_owner->build_bulk(std::move(bulk_keys)); !b)
             return fail(b.error());
     }
     if (auto fl = idx_owner->flush(); !fl) return fail(fl.error());
@@ -7077,7 +7177,7 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
     // sync_all_indexes_ instead of leaving it stale again.
     auto& m_pre   = index_bindings();
     auto& act_pre = active_binding_for();
-    if (is_cdx) {
+    if (is_cdx || adt_to_cdx) {
         auto sibs = openads::drivers::cdx::CdxIndex::list_tags(p.string());
         if (sibs) {
             for (const auto& sib : sibs.value()) {
@@ -17865,7 +17965,14 @@ UNSIGNED32 AdsGetKeyNum(ADSHANDLE hObj, UNSIGNED16 /*usFilterOption*/,
         *pulKeyNum = (pos == 0xFFFFFFFFu) ? 0u : (pos + 1u);
         return ok();
     }
-    // Non-CDX: legacy O(n) walk (cursor restored).
+    // ADI: same O(1) logical-position cache (else a large browse walked the
+    // whole index per scrollbar paint -> very slow visualization).
+    if (auto* adi = dynamic_cast<openads::drivers::adi::AdiIndex*>(idx)) {
+        std::uint32_t pos = adi->pos_of_recno_cached(rn);
+        *pulKeyNum = (pos == 0xFFFFFFFFu) ? 0u : (pos + 1u);
+        return ok();
+    }
+    // Non-CDX/ADI: legacy O(n) walk (cursor restored).
     idx->invalidate_cursor();
     auto first = idx->seek_first();
     if (!first) { (void)t->goto_record(rn); return fail(first.error()); }
@@ -18065,7 +18172,22 @@ UNSIGNED32 AdsGetRelKeyPos(ADSHANDLE h, double* p) {
                  static_cast<double>(walk.size() - 1);
             return ok();
         }
-        // Non-CDX (NTX/ADI): legacy per-call O(n) walk.
+        // ADI: same O(1) cached walk (else the scrollbar froze large browses).
+        if (auto* adi = dynamic_cast<openads::drivers::adi::AdiIndex*>(idx)) {
+            const auto& walk = adi->ordered_recnos_cached();
+            if (walk.size() <= 1) { *p = 0.0; return ok(); }
+            std::uint32_t pos = adi->pos_of_recno_cached(rn);
+            if (pos == 0xFFFFFFFFu) {
+                if (rn > rc) rn = rc;
+                *p = static_cast<double>(rn - 1) /
+                     static_cast<double>(rc - 1);
+                return ok();
+            }
+            *p = static_cast<double>(pos) /
+                 static_cast<double>(walk.size() - 1);
+            return ok();
+        }
+        // Non-CDX/ADI (NTX): legacy per-call O(n) walk.
         idx->invalidate_cursor();
         auto first = idx->seek_first();
         if (!first) return fail(first.error());
@@ -18215,6 +18337,9 @@ UNSIGNED32 AdsSetRelKeyPos(ADSHANDLE h, double pos) {
         if (auto* cdx =
                 dynamic_cast<openads::drivers::cdx::CdxIndex*>(idx)) {
             walkp = &cdx->ordered_recnos_cached();   // O(1) after first build
+        } else if (auto* adi =
+                dynamic_cast<openads::drivers::adi::AdiIndex*>(idx)) {
+            walkp = &adi->ordered_recnos_cached();   // O(1) after first build
         } else {
             idx->invalidate_cursor();
             auto first = idx->seek_first();
@@ -18920,6 +19045,13 @@ UNSIGNED32 AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
             *pulCount = static_cast<UNSIGNED32>(
                 cdx->ordered_recnos_cached().size());
             return ok();
+        }
+        // ADI: a conditional (FOR) tag holds only the matching entries; count
+        // the index, not the table (record_count() would overstate it).
+        if (auto* adi =
+                dynamic_cast<openads::drivers::adi::AdiIndex*>(ord->index())) {
+            auto c = adi->entry_count();
+            if (c) { *pulCount = static_cast<UNSIGNED32>(c.value()); return ok(); }
         }
     }
     // No active index, but a SQL ORDER BY / DISTINCT / LIMIT result (or an AOF

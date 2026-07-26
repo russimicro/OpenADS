@@ -1,0 +1,365 @@
+; OpenADS exports IMPLEMENTADOS + ordinales SAP (drop-in por ordinal)
+LIBRARY
+EXPORTS
+    AdsConnect60    @315
+    AdsDisconnect    @32
+    AdsOpenTable    @124
+    AdsCloseTable    @19
+    AdsGotoTop    @105
+    AdsGotoBottom    @103
+    AdsSkip    @158
+    AdsAtEOF    @5
+    AdsAtBOF    @4
+    AdsGetField    @58
+    AdsGetFieldName    @61
+    AdsGetNumFields    @78
+    AdsGetFieldType    @64
+    AdsGetFieldLength    @60
+    AdsGetRecordNum    @85
+    AdsGetRecordCount    @84
+    AdsGetLastError    @74
+    AdsGetVersion    @101
+    AdsAppendRecord    @2
+    AdsWriteRecord    @163
+    AdsDeleteRecord    @31
+    AdsRecallRecord    @126
+    AdsIsRecordDeleted    @190
+    AdsSetString    @155
+    AdsSetLogical    @145
+    AdsSetDouble    @138
+    AdsLockRecord    @121
+    AdsUnlockRecord    @160
+    AdsLockTable    @122
+    AdsUnlockTable    @161
+    AdsSetLockCycle
+    AdsGetLockCycle
+    AdsSetLockRetryCount
+    AdsGetLockRetryCount
+    AdsFlushFileBuffers    @378
+    AdsOpenIndex    @123
+    AdsCloseIndex    @18
+    AdsCloseAllIndexes    @16
+    AdsCreateIndex    @26
+    AdsDeleteIndex    @30
+    AdsGetNumIndexes    @79
+    AdsGetIndexHandle    @70
+    AdsGetIndexHandleByOrder    @204
+    AdsGetIndexExpr    @68
+    AdsGetIndexName    @71
+    AdsSetIndexDirection    @509
+    AdsSeek    @130
+    AdsSeekLast    @131
+    AdsSetScope    @152
+    AdsClearScope    @15
+    AdsGetScope    @88
+    AdsPackTable    @125
+    AdsZapTable    @164
+    AdsSetAOF    @216
+    AdsGetAOFOptLevel    @223
+    AdsClearAOF    @218
+    AdsGetMemoLength    @77
+    AdsGetMemoDataType    @195
+    AdsBinaryToFile    @7
+    AdsFileToBinary    @40
+    AdsGetLastAutoinc    @336
+    AdsEnableEncryption    @148
+    AdsDisableEncryption    @12
+    AdsIsEncryptionEnabled    @283
+    AdsIsTableEncrypted    @118
+    AdsIsRecordEncrypted    @115
+    AdsEncryptTable    @33
+    AdsDecryptTable    @28
+    AdsEncryptRecord    @281
+    AdsDecryptRecord    @282
+    AdsBeginTransaction    @6
+    AdsCommitTransaction    @20
+    AdsRollbackTransaction    @129
+    AdsInTransaction    @106
+    AdsCreateSavepoint    @468
+    AdsReleaseSavepoint
+    AdsSetEncryptionPassword
+    AdsSetCollation    @499
+    AdsConvertOemToAnsi
+    AdsConvertAnsiToOem
+    AdsRollbackTransaction80    @467
+    AdsDDCreate    @308
+    AdsDDAddTable    @313
+    AdsDDRemoveTable    @314
+    AdsCreateSQLStatement    @263
+    AdsCloseSQLStatement    @262
+    AdsPrepareSQL    @267
+    AdsGetNumParams    @306
+    AdsExecuteSQL    @264
+    AdsExecuteSQLDirect    @265
+    AdsAddCustomKey    @1
+    AdsApplicationExit    @3
+    AdsCacheOpenCursors    @279
+    AdsCacheOpenTables    @8
+    AdsCacheRecords    @242
+    AdsCheckExistence    @167
+    AdsClearCallbackFunction    @389
+    AdsClearFilter    @10
+    AdsClearRelation    @14
+    AdsCloseAllTables    @17
+    AdsCloseCachedTables    @438
+    AdsConnect    @21
+    AdsConvertTable    @248
+    AdsCopyTable    @23
+    AdsCopyTableContents    @24
+    AdsCreateFTSIndex    @419
+    AdsFTSSearch
+    AdsCreateIndex61    @380
+    AdsCreateTable    @27
+    AdsCustomizeAOF    @258
+    AdsDDAddIndexFile    @333
+    AdsDDAddUserToGroup    @351
+    AdsDDCreateLink    @181
+    AdsDDCreateFunction    @475
+    AdsDDCreateProcedure
+    AdsDDCreateRefIntegrity    @318
+    AdsDDCreateTrigger    @411
+    AdsDDCreateUser    @350
+    AdsDDCreateView
+    AdsDDDeleteUser    @352
+    AdsDDDropLink    @182
+    AdsDDDropFunction    @476
+    AdsDDDropProcedure
+    AdsDDDropTrigger
+    AdsDDDropView
+    AdsDDGetDatabaseProperty    @311
+    AdsDDGetFieldProperty    @332
+    AdsDDGetIndexProperty    @360
+    AdsDDGetFunctionProperty
+    AdsDDGetProcProperty
+    AdsDDGetTableProperty    @316
+    AdsDDGetTriggerProperty    @413
+    AdsDDGetUserProperty    @361
+    AdsDDGetUserTableRights
+    AdsDDGetViewProperty    @342
+    AdsDDModifyLink    @444
+    AdsDDRemoveIndexFile    @338
+    AdsDDRemoveRefIntegrity    @334
+    AdsDDRemoveUserFromGroup    @353
+    AdsDDSetDatabaseProperty    @312
+    AdsDDSetFieldProperty    @331
+    AdsDDSetIndexProperty    @481
+    AdsDDSetFunctionProperty
+    AdsDDSetProcProperty
+    AdsDDSetTableProperty    @317
+    AdsDDSetTriggerProperty    @472
+    AdsDDSetUserProperty    @367
+    AdsDDSetUserTableRights
+    AdsDDSetViewProperty    @445
+    AdsDeleteCustomKey    @29
+    AdsDeleteFile    @187
+    AdsEvalAOF    @217
+    AdsExtractKey    @38
+    AdsFailedTransactionRecovery    @39
+    AdsFindClose    @170
+    AdsFindFirstTable    @171
+    AdsFindNextTable    @172
+    AdsGetAllLocks    @43
+    AdsGetAOF    @222
+    AdsGetBinary    @45
+    AdsGetBinaryLength    @46
+    AdsGetConnectionType    @209
+    AdsGetDateFormat    @50
+    AdsGetDefault    @52
+    AdsGetDeleted    @53
+    AdsGetDouble    @54
+    AdsGetEpoch    @55
+    AdsGetErrorString    @56
+    AdsGetExact    @57
+    AdsGetFieldDecimals    @59
+    AdsGetFieldRaw    @328
+    AdsGetFieldW    @524
+    AdsGetFilter    @65
+    AdsGetHandleType    @202
+    AdsGetIndexCondition    @67
+    AdsGetIndexFilename    @69
+    AdsGetIndexOrderByHandle    @207
+    AdsGetJulian    @188
+    AdsGetKeyLength    @189
+    AdsGetKeyNum    @73
+    AdsGetKeyType    @173
+    AdsGetLastTableUpdate    @203
+    AdsGetLogical    @75
+    AdsGetLong    @76
+    AdsGetLongLong    @418
+    AdsGetMilliseconds    @250
+    AdsGetNumActiveLinks    @179
+    AdsGetNumLocks    @80
+    AdsGetNumOpenTables    @81
+    AdsGetRecord    @83
+    AdsGetRecordLength    @86
+    AdsGetRelKeyPos    @87
+    AdsGetSearchPath    @89
+    AdsGetServerName    @90
+    AdsGetServerTime    @295
+    AdsGetString    @91
+    AdsGetStringW    @522
+    AdsGetTableAlias    @92
+    AdsGetTableCharType    @93
+    AdsGetTableConnection    @208
+    AdsGetTableFilename    @94
+    AdsGetTableType    @100
+    AdsGotoRecord    @104
+    AdsIsConnectionAlive    @449
+    AdsIsEmpty    @107
+    AdsIsExprValid    @108
+    AdsIsFound    @110
+    AdsIsIndexCustom    @112
+    AdsIsIndexDescending    @113
+    AdsIsIndexUnique    @114
+    AdsIsNull    @488
+    AdsIsRecordInAOF    @238
+    AdsIsRecordLocked    @116
+    AdsIsServerLoaded    @117
+    AdsIsTableLocked    @119
+    AdsMgConnect    @239
+    AdsMgDisconnect    @240
+    AdsMgGetActivityInfo    @226
+    AdsMgGetCommStats    @224
+    AdsMgGetConfigInfo    @225
+    AdsMgGetInstallInfo    @227
+    AdsMgGetLockOwner    @237
+    AdsMgGetLocks    @233
+    AdsMgGetOpenIndexes    @232
+    AdsMgGetOpenTables    @231
+    AdsMgGetServerType    @234
+    AdsMgGetUserNames    @230
+    AdsMgGetWorkerThreadActivity    @236
+    AdsMgKillUser    @235
+    AdsMgResetCommStats    @228
+    AdsRefreshAOF    @219
+    AdsRefreshRecord    @197
+    AdsRegisterCallbackFunction    @388
+    AdsReindex    @128
+    AdsRestructureTable    @322
+    AdsSetBinary    @132
+    AdsSetDateFormat    @135
+    AdsSetDecimals    @136
+    AdsSetDefault    @137
+    AdsSetEpoch    @140
+    AdsSetExact    @141
+    AdsSetFieldRaw    @206
+    AdsSetFilter    @143
+    AdsSetJulian    @193
+    AdsSetLongLong    @417
+    AdsSetMilliseconds    @249
+    AdsSetRecord    @149
+    AdsSetRelation    @150
+    AdsSetRelKeyPos    @151
+    AdsSetScopedRelation    @153
+    AdsSetSearchPath    @154
+    AdsSetServerType    @201
+    AdsSetStringW    @521
+    AdsShowDeleted    @156
+    AdsShowError    @157
+    AdsSkipUnique    @510
+    AdsStmtSetTableLockType    @270
+    AdsStmtSetTablePassword    @293
+    AdsStmtSetTableReadOnly    @271
+    AdsStmtSetTableType    @273
+    AdsVerifySQL    @401
+    AdsWriteAllRecords    @162
+    _dclass
+    _dsign
+    _getch
+    _kbhit
+    _eof
+    AdsClearProgressCallback    @13
+    AdsCopyTableContent
+    AdsData
+    AdsFilterOption
+    AdsGetTableConType
+    AdsMgGetOpenTables2
+    AdsRegisterProgressCallback    @127
+    AdsTestLogin
+    AdsTestRecLocks
+    AdsStudioStart
+    AdsStudioStop
+    AdsStudioPort
+    AdsSetIndexOrder
+    AdsSetIndexOrderByHandle
+    AdsConnect26    @302
+    AdsCreateTable71    @441
+    AdsCreateTable90    @492
+    AdsOpenTable90    @486
+    AdsCreateIndex90    @508
+    AdsCancelUpdate90    @491
+    AdsDDAddTable90    @494
+    AdsDDCreateRefIntegrity62    @397
+    AdsFindConnection25    @289
+    AdsFindFirstTable62    @402
+    AdsFindNextTable62    @403
+    AdsGetBookmark60    @372
+    AdsGetDateFormat60    @386
+    AdsGetExact22    @255
+    AdsGetTableHandle25    @275
+    AdsGotoBookmark60    @375
+    AdsReindex61    @381
+    AdsRestructureTable90    @495
+    AdsSetProperty90    @484
+    AdsGetMemoBlockSize    @469
+    AdsGetTableOpenOptions    @98
+    AdsGetBookmark    @47
+    AdsCancelUpdate    @196
+    AdsClearAllScopes    @9
+    AdsClearDefault    @205
+    AdsResetConnection    @434
+    AdsThreadExit    @159
+    AdsDisableLocalConnections    @329
+    AdsEnableRI    @406
+    AdsDisableRI    @407
+    AdsEnableUniqueEnforcement    @404
+    AdsDisableUniqueEnforcement    @405
+    AdsEnableAutoIncEnforcement    @409
+    AdsDisableAutoIncEnforcement    @410
+    AdsRecallAllRecords    @436
+    AdsIsRecordVisible    @285
+    AdsGetKeyCount    @72
+    AdsContinue    @22
+    AdsEvalTestExpr    @37
+    AdsEvalLogicalExpr    @34
+    AdsEvalNumericExpr    @35
+    AdsEvalStringExpr    @36
+    AdsFindConnection    @41
+    AdsGetAllIndexes    @42
+    AdsGetFTSIndexes    @422
+    AdsGetAllTables    @44
+    AdsCloneTable    @210
+    AdsCopyTableStructure    @25
+    AdsGetRecordCRC    @440
+    AdsInitRawKey    @252
+    AdsMgDumpInternalTables    @229
+    AdsClearSQLAbortFunc    @298
+    AdsClearSQLParams    @274
+    AdsStmtClearTablePasswords    @294
+    AdsStmtDisableEncryption    @292
+    AdsStmtSetTableCharType    @269
+    AdsStmtSetTableCollation    @501
+    AdsStmtSetTableRights    @272
+    AdsSetField    @142
+    AdsSetEmpty    @139
+    AdsSetNull    @490
+    AdsSetShort    @246
+    AdsSetMoney    @416
+    AdsSetTime    @244
+    AdsSetTimeStamp    @268
+    AdsGetDate    @49
+    AdsDDGetRefIntegrityProperty    @337
+    AdsDDSetRefIntegrityProperty
+    AdsDDAddProcedure    @356
+    AdsDDRemoveProcedure    @357
+    AdsDDGetProcedureProperty    @358
+    AdsDDSetProcedureProperty    @446
+    AdsDDRemoveTrigger    @412
+    AdsDDFindFirstObject    @319
+    AdsDDFindNextObject    @320
+    AdsDDFindClose    @321
+    AdsDDAddView    @340
+    AdsDDRemoveView    @341
+    AdsDDGetPermissions    @392
+    AdsDDGrantPermission    @393
+    AdsDDRevokePermission    @394

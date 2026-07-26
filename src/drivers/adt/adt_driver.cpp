@@ -39,6 +39,7 @@ std::uint32_t read_u32_le(const std::uint8_t* p) {
 DbfFieldType classify_adt_field(std::uint16_t raw_type) {
     switch (raw_type) {
         case  1: return DbfFieldType::Logical;
+        case  2: return DbfFieldType::Numeric;   // ADS_NUMERIC (common in real ADT files for N fields)
         case  3: return DbfFieldType::AdtDate;
         case  4: return DbfFieldType::Character;
         case  5: return DbfFieldType::Memo;
@@ -214,19 +215,59 @@ AdtDriver::read_record_raw(std::uint32_t recno) {
         }
     }
     std::vector<std::uint8_t> buf(rec_len_, 0);
+
+    // Fast path: the record is already in the read-ahead block -> serve it
+    // with a memcpy, no syscall. The cache holds raw on-disk bytes; normalise
+    // the deletion flag on the returned copy (mirrors the non-cached tail).
+    if (read_cache_first_ != 0 &&
+        recno >= read_cache_first_ &&
+        recno <  read_cache_first_ + read_cache_recs_) {
+        std::size_t pos = static_cast<std::size_t>(recno - read_cache_first_) *
+                          rec_len_;
+        std::memcpy(buf.data(), read_cache_.data() + pos, rec_len_);
+        normalize_deletion_flag_(buf.data());
+        return buf;
+    }
+
+    // Miss: fetch the ALIGNED block that contains recno. Aligning (rather
+    // than starting at recno) keeps backward scans and local random reads
+    // hitting the cache too, and bounds a record to exactly one block.
+    std::uint32_t blk_recs = rec_len_ != 0
+        ? static_cast<std::uint32_t>(kReadAheadBytes / rec_len_)
+        : 1u;
+    if (blk_recs == 0) blk_recs = 1;
+    std::uint32_t first = ((recno - 1) / blk_recs) * blk_recs + 1;
+    std::uint32_t last  = first + blk_recs - 1;
+    if (last > rec_count_) last = rec_count_;
+    std::uint32_t nrecs = last - first + 1;
+
     std::uint64_t offset = static_cast<std::uint64_t>(hdr_len_) +
-                           static_cast<std::uint64_t>(recno - 1) *
+                           static_cast<std::uint64_t>(first - 1) *
                            static_cast<std::uint64_t>(rec_len_);
-    auto got = file_.read_at(offset, buf.data(), buf.size());
-    if (!got) return got.error();
-    if (got.value() < buf.size()) {
+    std::size_t block_bytes = static_cast<std::size_t>(nrecs) * rec_len_;
+    read_cache_.assign(block_bytes, 0);
+    auto got = file_.read_at(offset, read_cache_.data(), block_bytes);
+    if (!got) { invalidate_read_cache_(); return got.error(); }
+
+    // A short read still yields whole records up to what landed; the target
+    // recno is the first record of the block, so any non-empty read covers it.
+    std::uint32_t got_recs = rec_len_ != 0
+        ? static_cast<std::uint32_t>(got.value() / rec_len_)
+        : 0u;
+    if (got_recs == 0 || recno >= first + got_recs) {
         // Re-check size in case a truncate raced; re-cap and re-test.
+        invalidate_read_cache_();
         cap_record_count_from_size_();
         if (recno > rec_count_) {
             return util::Error{5000, 0, "record number out of range", ""};
         }
         return util::Error{5000, 0, "short read on ADT record body", ""};
     }
+    read_cache_first_ = first;
+    read_cache_recs_  = got_recs;
+
+    std::size_t pos = static_cast<std::size_t>(recno - first) * rec_len_;
+    std::memcpy(buf.data(), read_cache_.data() + pos, rec_len_);
     normalize_deletion_flag_(buf.data());
     return buf;
 }
@@ -237,6 +278,7 @@ AdtDriver::write_record_raw(std::uint32_t recno,
     if (mode_ == DriverOpenMode::ReadOnly) {
         return util::Error{5000, 0, "table opened read-only", ""};
     }
+    invalidate_read_cache_();   // record body about to change on disk
     if (recno == 0 || recno > rec_count_) {
         if (auto rh = refresh_record_count_shared_(); !rh) return rh.error();
         if (recno > rec_count_) {
@@ -270,6 +312,7 @@ AdtDriver::append_record_raw(const std::uint8_t* buf, std::size_t n) {
     if (mode_ == DriverOpenMode::ReadOnly) {
         return util::Error{5000, 0, "table opened read-only", ""};
     }
+    invalidate_read_cache_();   // rec_count_ / trailing block change
     if (n != rec_len_) {
         return util::Error{5000, 0, "record buffer length mismatch", ""};
     }
@@ -364,6 +407,7 @@ util::Result<void> AdtDriver::zap() {
     if (mode_ == DriverOpenMode::ReadOnly) {
         return util::Error{5000, 0, "table opened read-only", ""};
     }
+    invalidate_read_cache_();   // file truncated below
     rec_count_ = 0;
     if (auto r = rewrite_header_(); !r) return r.error();
     // Truncate to the header length so stale record bytes don't linger.
@@ -372,6 +416,28 @@ util::Result<void> AdtDriver::zap() {
     if (auto r = file_.truncate(static_cast<std::uint64_t>(hdr_len_)); !r)
         return r.error();
     return file_.sync();
+}
+
+util::Result<bool> AdtDriver::truncate_to(std::uint32_t recno) {
+    if (mode_ == DriverOpenMode::ReadOnly) {
+        return util::Error{5000, 0, "table opened read-only", ""};
+    }
+    invalidate_read_cache_();
+    // Hold the header region while we refresh the count and shrink the file.
+    auto lk = acquire_with_retry_(file_, 0, 400);
+    if (!lk) return lk.error();
+    if (auto rh = refresh_record_count_(); !rh) return rh.error();
+    if (recno > rec_count_) return false;   // can't grow; nothing trailing to drop
+    rec_count_ = recno;
+    if (auto r = rewrite_header_(); !r) return r.error();
+    // ADT keeps no 0x1A EOF marker (unlike DBF): file size is exactly
+    // hdr_len_ + rec_count_*rec_len_, which cap_record_count_from_size_ relies
+    // on. Shrink to that so a later reopen's physical count matches the header.
+    std::uint64_t end_off = static_cast<std::uint64_t>(hdr_len_) +
+                            static_cast<std::uint64_t>(rec_count_) *
+                            static_cast<std::uint64_t>(rec_len_);
+    if (auto tr = file_.truncate(end_off); !tr) return tr.error();
+    return true;
 }
 
 util::Result<std::uint32_t>

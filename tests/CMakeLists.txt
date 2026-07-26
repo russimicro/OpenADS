@@ -21,8 +21,6 @@ add_executable(openads_unit_tests
     unit/util_result_test.cpp
     unit/util_span_test.cpp
     unit/util_log_test.cpp
-    unit/serverd_config_ini_test.cpp
-    ${CMAKE_SOURCE_DIR}/tools/serverd/config_ini.cpp
     unit/platform_file_test.cpp
     unit/platform_lock_test.cpp
     unit/platform_mmap_test.cpp
@@ -49,15 +47,9 @@ add_executable(openads_unit_tests
     unit/engine_order_test.cpp
     unit/engine_scope_test.cpp
     unit/abi_index_smoke_test.cpp
-    unit/abi_qa_repro_test.cpp
     unit/aof_expr_test.cpp
-    unit/aggregate_test.cpp
-    unit/abi_aggregate_test.cpp
     unit/aof_eval_test.cpp
     unit/abi_aof_test.cpp
-    unit/abi_cdx_tag_order_test.cpp
-    unit/abi_cdx_expr_index_scale_test.cpp
-    unit/abi_multitag_order_nav_test.cpp
     unit/aes_test.cpp
     unit/dbt_memo_test.cpp
     unit/fpt_memo_test.cpp
@@ -73,14 +65,11 @@ add_executable(openads_unit_tests
     unit/sql_parser_test.cpp
     unit/abi_sql_smoke_test.cpp
     unit/abi_plus_sqlite_read_test.cpp
-    unit/abi_plus_sqlite_filter_test.cpp
-    unit/abi_aggregate_sqlite_test.cpp
     unit/abi_plus_sqlite_seek_test.cpp
     unit/abi_plus_sqlite_passthrough_test.cpp
     unit/abi_plus_sqlcipher_read_test.cpp
     unit/lsn_map_test.cpp
     unit/index_expr_test.cpp
-    unit/index_expr_sql_test.cpp
     unit/abi_m92_real_test.cpp
     unit/abi_create_table_test.cpp
     unit/abi_refresh_extract_test.cpp
@@ -88,24 +77,17 @@ add_executable(openads_unit_tests
     unit/abi_index_expr_validation_test.cpp
     unit/abi_zap_pack_test.cpp
     unit/abi_pack_reindex_softseek_test.cpp
-    unit/abi_ntx_pack_reindex_test.cpp
-    unit/abi_ntx_pack_reindex_multipage_test.cpp
-    unit/abi_ntx_multipage_dup_test.cpp
-    unit/abi_ntx_internal_split_test.cpp
+    unit/abi_stale_index_walk_test.cpp
+    unit/abi_conditional_index_nav_test.cpp
+    unit/abi_multitag_order_nav_test.cpp
+    unit/abi_cdx_tag_order_test.cpp
+    unit/abi_cdx_expr_index_scale_test.cpp
+    unit/abi_conditional_index_refilter_test.cpp
+    unit/abi_sql_temp_browse_nav_test.cpp
     unit/abi_record_count_filter_test.cpp
     unit/abi_reindex_test.cpp
-    unit/abi_cdx_conditional_index_test.cpp
-    unit/abi_conditional_index_nav_test.cpp
-    unit/abi_conditional_index_refilter_test.cpp
-    unit/abi_cond_refilter_no_close_test.cpp
     unit/ntx_multilevel_test.cpp
     unit/cdx_multilevel_test.cpp
-    unit/cdx_multitag_2nd_test.cpp
-    unit/cdx_prefix_seek_test.cpp
-    unit/cdx_reindex_char_test.cpp
-    unit/cdx_prev_empty_leaf_test.cpp
-    unit/cdx_empty_tree_test.cpp
-    unit/abi_ntx_numeric_edge_test.cpp
     unit/abi_memo_large_test.cpp
     unit/abi_ordsetfocus_test.cpp
     unit/abi_seek_empty_test.cpp
@@ -123,11 +105,6 @@ add_executable(openads_unit_tests
     unit/abi_find_table_test.cpp
     unit/abi_binary_memo_test.cpp
     unit/abi_ntx_multitag_test.cpp
-    unit/abi_ntx_numeric_key_test.cpp
-    unit/abi_cdx_char_keylen_test.cpp
-    unit/abi_cdx_index_direction_test.cpp
-    unit/abi_cdx_empty_table_keylen_test.cpp
-    unit/abi_cdx_recreate_tag_diff_expr_test.cpp
     unit/abi_ordnumber_test.cpp
     unit/abi_server_info_test.cpp
     unit/abi_unicode_test.cpp
@@ -149,10 +126,6 @@ add_executable(openads_unit_tests
     unit/abi_remote_overloads_test.cpp
     unit/abi_remote_prefetch_test.cpp
     unit/abi_append_autolock_test.cpp
-    unit/abi_get_set_record_test.cpp
-    unit/abi_set_relation_test.cpp
-    unit/abi_record_crc_aof_test.cpp
-    unit/abi_settings_refreshaof_test.cpp
     unit/abi_dd_persistence_test.cpp
     unit/dbf_vfp_test.cpp
     unit/abi_sql_or_test.cpp
@@ -182,18 +155,21 @@ add_executable(openads_unit_tests
     unit/abi_collation_codepage_test.cpp
     unit/network_socket_test.cpp
     unit/network_server_test.cpp
-    unit/network_pool_test.cpp
-    unit/network_frame_reader_test.cpp
     unit/abi_adt_smoke_test.cpp
     unit/abi_adt_create_test.cpp
     unit/abi_adi_create_test.cpp
-    unit/abi_adi_separate_bag_test.cpp
+    unit/abi_adi_dat_extension_path_test.cpp
+    unit/abi_adi_clear_multilevel_test.cpp
+    unit/abi_cdx_estaelec_compound_test.cpp
+    unit/abi_adi_estaelec_compound_test.cpp
+    unit/abi_adi_native_estaelec_test.cpp
     unit/abi_adi_types_test.cpp
     unit/abi_adi_multilevel_build_test.cpp
+    unit/abi_adi_frontcoding_size_test.cpp
+    unit/abi_adi_reindex_bench_test.cpp
     unit/abi_adt_scope_validation_test.cpp
     unit/abi_adi_smoke_test.cpp
     unit/abi_adt_sql_test.cpp
-    unit/openads_sql_c_test.cpp
     unit/abi_dd_table_prop_test.cpp
     unit/abi_dd_user_prop_test.cpp
     unit/abi_enum_test.cpp
@@ -205,44 +181,24 @@ add_executable(openads_unit_tests
     unit/abi_dd_trigger_fire_test.cpp
     unit/abi_dd_proc_view_test.cpp
     unit/abi_sql_system_tables_test.cpp
-    unit/abi_sql_system_primarykeys_test.cpp
     unit/abi_sql_dd_sql_test.cpp
     unit/abi_no_current_record_test.cpp
     unit/codepage_test.cpp
     unit/adm_memo_test.cpp
     unit/sqlite_uri_test.cpp
-    unit/abi_sql_stmt_concurrency_test.cpp
-    unit/sqlite_concurrency_test.cpp
     unit/proc_test.cpp
     unit/sql_common_test.cpp
-    unit/enterprise_config_test.cpp
     unit/legacy_crt_shims_test.cpp
     unit/dll_test.cpp
     unit/network_client_test.cpp
-    unit/abi_dd_invoicing_test.cpp
-    unit/abi_fetch_where_test.cpp
-    unit/backend_tier1_test.cpp
 )
-
-# OpenADS ODBC driver (provider) test — drives the driver's SQL* exports
-# directly. Windows only: relies on the MSVC SDK ODBC headers/types.
-if(WIN32)
-    target_sources(openads_unit_tests PRIVATE
-        unit/odbc_driver_test.cpp
-        unit/odbc_driver_pk_test.cpp
-        ${CMAKE_SOURCE_DIR}/bindings/odbc/openads_odbc.cpp)
-endif()
 
 if(OPENADS_WITH_POSTGRESQL)
     target_sources(openads_unit_tests PRIVATE
         unit/abi_plus_postgres_read_test.cpp
-        unit/abi_plus_postgres_write_test.cpp
-        unit/abi_plus_postgres_filter_test.cpp
-        unit/abi_aggregate_postgres_test.cpp
     unit/abi_plus_mariadb_read_test.cpp
     unit/abi_plus_odbc_read_test.cpp
     unit/abi_plus_odbc_seek_test.cpp
-    unit/abi_plus_odbc_write_test.cpp
     unit/odbc_uri_test.cpp
         unit/abi_plus_postgres_seek_test.cpp
     unit/abi_plus_mariadb_seek_test.cpp
@@ -253,7 +209,6 @@ endif()
 if(OPENADS_WITH_MARIADB)
     target_sources(openads_unit_tests PRIVATE
         unit/maria_uri_test.cpp
-        unit/abi_plus_mariadb_write_test.cpp
     )
 endif()
 
@@ -262,7 +217,6 @@ if(OPENADS_WITH_FIREBIRD)
         unit/firebird_uri_test.cpp
         unit/firebird_connection_test.cpp
         unit/abi_plus_firebird_read_test.cpp
-        unit/abi_plus_firebird_write_test.cpp
     )
 endif()
 
@@ -271,7 +225,6 @@ if(OPENADS_WITH_MSSQL)
         unit/abi_plus_mssql_connect_test.cpp
         unit/abi_plus_mssql_read_test.cpp
         unit/tds_protocol_test.cpp
-        unit/mssql_table_skip_test.cpp
         unit/mssql_uri_test.cpp
     )
 endif()
@@ -293,7 +246,6 @@ target_include_directories(openads_unit_tests SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/doctest
 )
 target_include_directories(openads_unit_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src
 )
 

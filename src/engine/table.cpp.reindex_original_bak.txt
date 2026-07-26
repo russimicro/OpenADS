@@ -1,0 +1,88 @@
+// BACKUP del bloque ORIGINAL de Table::reindex() (cuerpo tras los guards), por si
+// hay que revertir la optimizacion bulk del 2026-06-27. table.cpp NO es git en
+// OpenADS-main. Reemplaza el bloque nuevo (clear_data + build_bulk por indice) por esto.
+
+    // 1) Clear every bound index. Re-using the same erase walk that
+    //    zap() uses keeps the IIndex file structurally intact.
+    auto erase_all = [&](drivers::IIndex* idx) -> util::Result<void> {
+        if (idx == nullptr) return {};
+        std::vector<std::pair<std::uint32_t, std::string>> entries;
+        auto seek = idx->seek_first();
+        while (seek && seek.value().positioned) {
+            entries.emplace_back(seek.value().recno, idx->current_key());
+            seek = idx->next();
+        }
+        for (auto& [rec, key] : entries) {
+            (void)idx->erase(rec, key);
+        }
+        return {};
+    };
+    if (order_ && order_->index()) {
+        if (auto r = erase_all(order_->index()); !r) return r.error();
+    }
+    for (auto* x : extra_index_views_) {
+        if (auto r = erase_all(x); !r) return r.error();
+    }
+
+    // 2) Walk every live record and re-insert into each index using
+    //    its current key expression. Snapshot is built with empty
+    //    prev_keys so sync_all_indexes_ skips the (unneeded) erase
+    //    pass and performs only the insert.
+    std::vector<std::pair<drivers::IIndex*, std::string>> snap;
+    if (order_ && order_->index()) snap.emplace_back(order_->index(),
+                                                     std::string{});
+    for (auto* x : extra_index_views_) {
+        if (x) snap.emplace_back(x, std::string{});
+    }
+    // A conditional (FOR) tag must only hold records that pass its
+    // predicate; reindexing must re-apply that filter, not rebuild the
+    // tag unconditional. Capture each index's FOR clause once.
+    std::vector<std::string> snap_for;
+    snap_for.reserve(snap.size());
+    for (auto& [idx, prev] : snap) {
+        (void)prev;
+        snap_for.push_back(idx ? idx->condition() : std::string{});
+    }
+    bool any_for = false;
+    for (auto& f : snap_for) if (!f.empty()) { any_for = true; break; }
+
+    // Hoisted out of the per-record loop to avoid a heap allocation on every
+    // record of a large table; cleared and refilled each iteration.
+    std::vector<std::pair<drivers::IIndex*, std::string>> pass;
+    if (any_for) pass.reserve(snap.size());
+
+    auto rec_count = driver_->record_count();
+    for (std::uint32_t r = 1; r <= rec_count; ++r) {
+        if (auto g = goto_record_for_build(r); !g) return g.error();
+        if (is_deleted()) continue;
+        if (!any_for) {
+            if (auto s = sync_all_indexes_(snap); !s) return s.error();
+            continue;
+        }
+        // Re-insert only into the indexes whose FOR clause this record
+        // passes (an empty FOR is unconditional).
+        pass.clear();
+        for (std::size_t i = 0; i < snap.size(); ++i) {
+            if (snap_for[i].empty() ||
+                evaluate_index_expr_truthy(*this, snap_for[i])) {
+                pass.push_back(snap[i]);
+            }
+        }
+        if (!pass.empty()) {
+            if (auto s = sync_all_indexes_(pass); !s) return s.error();
+        }
+    }
+
+    // 3) Flush every index so the rebuilt entries hit disk before the
+    //    caller resumes work.
+    if (order_ && order_->index()) {
+        if (auto r = order_->index()->flush(); !r) return r.error();
+    }
+    for (auto* x : extra_index_views_) {
+        if (x == nullptr) continue;
+        if (auto r = x->flush(); !r) return r.error();
+    }
+    state_ = State::Bof;
+    recno_ = 0;
+    return {};
+}

@@ -1153,86 +1153,46 @@ util::Result<void> Table::reindex() {
     }
     if (driver_ == nullptr) return {};
 
-    // 1) Clear every bound index. Re-using the same erase walk that
-    //    zap() uses keeps the IIndex file structurally intact.
-    auto erase_all = [&](drivers::IIndex* idx) -> util::Result<void> {
-        if (idx == nullptr) return {};
-        std::vector<std::pair<std::uint32_t, std::string>> entries;
-        auto seek = idx->seek_first();
-        while (seek && seek.value().positioned) {
-            entries.emplace_back(seek.value().recno, idx->current_key());
-            seek = idx->next();
-        }
-        for (auto& [rec, key] : entries) {
-            (void)idx->erase(rec, key);
-        }
-        return {};
-    };
-    if (order_ && order_->index()) {
-        if (auto r = erase_all(order_->index()); !r) return r.error();
-    }
+    // Rebuild every bound index from the live records via a BULK load:
+    //   clear_data() (structural reset) + collect (key,recno) + build_bulk().
+    // CdxIndex's build_bulk packs the B+tree bottom-up (~2.5x faster end-to-end
+    // than the record-by-record insert() this used to do — measured 1891ms ->
+    // 770ms reindexing 100k recs x 3 tags), which dominated PACK/REINDEX on large
+    // tables. The structural clear_data also makes repeated reindex idempotent
+    // (the old erase_all walk could leave stale entries on a re-reindex). Indexes
+    // that don't override build_bulk/clear_data fall back to the walk-and-erase +
+    // per-record insert defaults (= prior behavior; NTX etc. unchanged). Each
+    // index is processed on its own so peak memory stays at one tag's key set
+    // (mirrors AdsCreateIndex61's per-tag build).
+    std::vector<drivers::IIndex*> idxs;
+    if (order_ && order_->index()) idxs.push_back(order_->index());
     for (auto* x : extra_index_views_) {
-        if (auto r = erase_all(x); !r) return r.error();
+        if (x != nullptr) idxs.push_back(x);
     }
 
-    // 2) Walk every live record and re-insert into each index using
-    //    its current key expression. Snapshot is built with empty
-    //    prev_keys so sync_all_indexes_ skips the (unneeded) erase
-    //    pass and performs only the insert.
-    std::vector<std::pair<drivers::IIndex*, std::string>> snap;
-    if (order_ && order_->index()) snap.emplace_back(order_->index(),
-                                                     std::string{});
-    for (auto* x : extra_index_views_) {
-        if (x) snap.emplace_back(x, std::string{});
-    }
-    // A conditional (FOR) tag must only hold records that pass its
-    // predicate; reindexing must re-apply that filter, not rebuild the
-    // tag unconditional. Capture each index's FOR clause once.
-    std::vector<std::string> snap_for;
-    snap_for.reserve(snap.size());
-    for (auto& [idx, prev] : snap) {
-        (void)prev;
-        snap_for.push_back(idx ? idx->condition() : std::string{});
-    }
-    bool any_for = false;
-    for (auto& f : snap_for) if (!f.empty()) { any_for = true; break; }
-
-    // Hoisted out of the per-record loop to avoid a heap allocation on every
-    // record of a large table; cleared and refilled each iteration.
-    std::vector<std::pair<drivers::IIndex*, std::string>> pass;
-    if (any_for) pass.reserve(snap.size());
-
-    auto rec_count = driver_->record_count();
-    for (std::uint32_t r = 1; r <= rec_count; ++r) {
-        if (auto g = goto_record_for_build(r); !g) return g.error();
-        if (is_deleted()) continue;
-        if (!any_for) {
-            if (auto s = sync_all_indexes_(snap); !s) return s.error();
-            continue;
+    const auto rec_count = driver_->record_count();
+    for (auto* idx : idxs) {
+        if (auto c = idx->clear_data(); !c) return c.error();
+        // A conditional (FOR) tag indexes only rows passing its predicate;
+        // an empty condition is unconditional.
+        const std::string cond = idx->condition();
+        const bool conditional = !cond.empty();
+        std::vector<std::pair<std::string, std::uint32_t>> keys;
+        keys.reserve(rec_count);
+        for (std::uint32_t r = 1; r <= rec_count; ++r) {
+            if (auto g = goto_record_for_build(r); !g) return g.error();
+            if (is_deleted()) continue;
+            if (conditional && !evaluate_index_expr_truthy(*this, cond)) continue;
+            // compute_index_key_ is the SAME key computation the live
+            // dbAppend/dbReplace path uses (FoxNumeric/expr aware), so the
+            // rebuilt entries are byte-identical to incrementally-built ones.
+            keys.emplace_back(compute_index_key_(idx), r);
         }
-        // Re-insert only into the indexes whose FOR clause this record
-        // passes (an empty FOR is unconditional).
-        pass.clear();
-        for (std::size_t i = 0; i < snap.size(); ++i) {
-            if (snap_for[i].empty() ||
-                evaluate_index_expr_truthy(*this, snap_for[i])) {
-                pass.push_back(snap[i]);
-            }
-        }
-        if (!pass.empty()) {
-            if (auto s = sync_all_indexes_(pass); !s) return s.error();
-        }
+        if (auto b = idx->build_bulk(std::move(keys)); !b) return b.error();
+        idx->invalidate_cursor();
+        if (auto f = idx->flush(); !f) return f.error();
     }
 
-    // 3) Flush every index so the rebuilt entries hit disk before the
-    //    caller resumes work.
-    if (order_ && order_->index()) {
-        if (auto r = order_->index()->flush(); !r) return r.error();
-    }
-    for (auto* x : extra_index_views_) {
-        if (x == nullptr) continue;
-        if (auto r = x->flush(); !r) return r.error();
-    }
     state_ = State::Bof;
     recno_ = 0;
     return {};

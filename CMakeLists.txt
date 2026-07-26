@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(OpenADS
-    VERSION 1.4.0
+    VERSION 1.2.1
     LANGUAGES C CXX
     DESCRIPTION "Open-source ADS-compatible engine"
 )
@@ -77,9 +77,6 @@ option(OPENADS_WITH_POSTGRESQL "Enable PostgreSQL-backed table driver (libpq)" O
 option(OPENADS_WITH_MARIADB "Enable MariaDB-backed table driver (libmariadb)" OFF)
 # Optional generic ODBC table driver (system ODBC driver manager). OFF by default.
 option(OPENADS_WITH_ODBC "Enable ODBC-backed table driver (system ODBC driver manager)" OFF)
-# Build the OpenADS ODBC *driver* (provider) DLL so external ODBC clients
-# (pyodbc, PDO_ODBC, Power BI, Excel, ...) can connect TO OpenADS. Windows only.
-option(OPENADS_BUILD_ODBC_DRIVER "Build the OpenADS ODBC driver DLL (Windows)" OFF)
 # Native MS SQL Server / TDS 7.4 backend. Requires OPENADS_WITH_TLS=ON
 # (uses mbedtls for the TLS layer that SQL Server mandates on port 1433
 # since MSSQL 2022 / Azure SQL). No external library is downloaded beyond
@@ -116,12 +113,6 @@ if(OPENADS_WITH_TLS)
     set(USE_STATIC_MBEDTLS_LIBRARY ON  CACHE BOOL "" FORCE)
     set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
     set(BUILD_SHARED_LIBS          OFF CACHE BOOL "" FORCE)
-    # Don't let the vendored, statically-linked mbedtls add its own install()
-    # rules / programs to our package (CPack would otherwise ship mbedtls
-    # headers + .cmake config). We only link it in.
-    set(ENABLE_PROGRAMS            OFF CACHE BOOL "" FORCE)
-    set(ENABLE_TESTING             OFF CACHE BOOL "" FORCE)
-    set(MBEDTLS_INSTALL            OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         mbedtls
         GIT_REPOSITORY https://github.com/Mbed-TLS/mbedtls.git
@@ -145,10 +136,6 @@ if(OPENADS_WITH_HTTP)
     set(HTTPLIB_USE_ZLIB_IF_AVAILABLE    OFF CACHE BOOL "" FORCE)
     set(HTTPLIB_USE_BROTLI_IF_AVAILABLE  OFF CACHE BOOL "" FORCE)
     set(HTTPLIB_REQUIRE_OPENSSL          OFF CACHE BOOL "" FORCE)
-    # Vendored statically into ace64.dll / serverd — don't let httplib or
-    # nlohmann/json export their headers and *Config.cmake into our package.
-    set(HTTPLIB_INSTALL OFF CACHE BOOL "" FORCE)
-    set(JSON_Install    OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         cpp_httplib
         GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
@@ -340,9 +327,6 @@ else()
 endif()
 
 add_subdirectory(src)
-if(OPENADS_BUILD_ODBC_DRIVER AND WIN32)
-    add_subdirectory(bindings/odbc)
-endif()
 add_subdirectory(tools/serverd)
 add_subdirectory(tools/bench)
 add_subdirectory(tools/stress)
@@ -353,113 +337,3 @@ if(OPENADS_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
-
-# ---------------------------------------------------------------------------
-# Install rules + CPack — produce a structured, reproducible package with the
-# same shape the release.yml staging assembles by hand (engine DLL + drop-in
-# ACE-named copy, import libs, server/bench CLIs, headers, docs). Purely
-# additive: a plain `cmake --build` is unaffected; `cmake --install` /
-# `cpack` are opt-in.
-# ---------------------------------------------------------------------------
-include(GNUInstallDirs)
-
-# Windows packages are traditionally flat (drop ace64.dll next to the .exe),
-# matching the existing release zip and QUICKSTART; POSIX follows the GNU
-# layout so the systemd/DEB story lands binaries under bin/ and lib/.
-if(WIN32)
-    set(OA_INSTALL_BIN ".")
-    set(OA_INSTALL_LIB "lib")
-    set(OA_INSTALL_DOC ".")
-else()
-    set(OA_INSTALL_BIN "${CMAKE_INSTALL_BINDIR}")
-    set(OA_INSTALL_LIB "${CMAKE_INSTALL_LIBDIR}")
-    set(OA_INSTALL_DOC "${CMAKE_INSTALL_DOCDIR}")
-endif()
-
-if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    set(OA_BITS "64")
-    set(OA_ARCH "x64")
-else()
-    set(OA_BITS "32")
-    set(OA_ARCH "x86")
-endif()
-
-# Engine shared library (openace64/openace32) + its import lib.
-install(TARGETS openads_ace
-    RUNTIME DESTINATION "${OA_INSTALL_BIN}"
-    LIBRARY DESTINATION "${OA_INSTALL_BIN}"
-    ARCHIVE DESTINATION "${OA_INSTALL_LIB}")
-
-# Drop-in-named copy so apps that load OpenADS by the canonical ACE name
-# (ace64.dll / libace64.so / libace64.dylib) work without renaming anything.
-if(WIN32)
-    install(FILES "$<TARGET_FILE:openads_ace>"
-        DESTINATION "${OA_INSTALL_BIN}" RENAME "ace${OA_BITS}.dll")
-elseif(APPLE)
-    install(FILES "$<TARGET_FILE:openads_ace>"
-        DESTINATION "${OA_INSTALL_BIN}" RENAME "libace${OA_BITS}.dylib")
-else()
-    install(FILES "$<TARGET_FILE:openads_ace>"
-        DESTINATION "${OA_INSTALL_BIN}" RENAME "libace${OA_BITS}.so")
-endif()
-
-# Server + bench CLIs.
-install(TARGETS openads_serverd openads_bench
-    RUNTIME DESTINATION "${OA_INSTALL_BIN}")
-
-# Public ACE headers.
-install(DIRECTORY "${CMAKE_SOURCE_DIR}/include/"
-    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
-
-# License + docs.
-install(FILES "${CMAKE_SOURCE_DIR}/LICENSE"
-              "${CMAKE_SOURCE_DIR}/NOTICE"
-              "${CMAKE_SOURCE_DIR}/README.md"
-    DESTINATION "${OA_INSTALL_DOC}")
-
-# Prebuilt per-compiler import libraries (MSVC / MinGW / Borland), Windows.
-if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/dist/import-libs/${OA_ARCH}")
-    install(DIRECTORY "${CMAKE_SOURCE_DIR}/dist/import-libs/${OA_ARCH}/"
-        DESTINATION "${OA_INSTALL_LIB}")
-endif()
-
-# Service unit templates (handy for unattended deploys).
-install(FILES "${CMAKE_SOURCE_DIR}/tools/scripts/systemd/openads-serverd.service"
-              "${CMAKE_SOURCE_DIR}/tools/scripts/launchd/com.openads.serverd.plist"
-    DESTINATION "${OA_INSTALL_DOC}/service" OPTIONAL)
-
-# Onboarding files that land with sibling PRs (#88 config template, #90 kit).
-# OPTIONAL keeps this PR self-contained against upstream/main — they install
-# automatically once those merge.
-install(FILES "${CMAKE_SOURCE_DIR}/openads.ini.sample"
-              "${CMAKE_SOURCE_DIR}/QUICKSTART.md"
-              "${CMAKE_SOURCE_DIR}/openads-studio.sh"
-              "${CMAKE_SOURCE_DIR}/openads-studio.bat"
-    DESTINATION "${OA_INSTALL_BIN}" OPTIONAL)
-
-# --- CPack ------------------------------------------------------------------
-set(CPACK_PACKAGE_NAME "openads")
-set(CPACK_PACKAGE_VENDOR "OpenADS")
-set(CPACK_PACKAGE_VERSION "${OPENADS_VERSION_STR}")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
-set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/FiveTechSoft/OpenADS")
-set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
-set(CPACK_VERBATIM_VARIABLES ON)
-if(WIN32)
-    set(_oa_os "windows")
-elseif(APPLE)
-    set(_oa_os "macos")
-else()
-    set(_oa_os "linux")
-endif()
-set(CPACK_PACKAGE_FILE_NAME "openads-${OPENADS_VERSION_STR}-${_oa_os}-${OA_ARCH}")
-if(WIN32)
-    set(CPACK_GENERATOR "ZIP")
-elseif(APPLE)
-    set(CPACK_GENERATOR "TGZ")
-else()
-    set(CPACK_GENERATOR "TGZ;DEB")
-    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "OpenADS")
-    set(CPACK_DEBIAN_PACKAGE_SECTION "database")
-endif()
-include(CPack)

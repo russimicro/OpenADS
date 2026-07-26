@@ -1581,7 +1581,25 @@ CdxIndex::create(const std::string& path,
                  const std::string& key_expr,
                  std::uint16_t      key_size,
                  bool               unique,
-                 bool               descend) {
+                 bool               descend,
+                 const std::string& for_expr) {
+    // Ensure parent dir exists (robustness for various PRG index creation paths)
+    {
+        namespace fs = std::filesystem;
+        fs::path ap(path);
+        fs::path par = ap.parent_path();
+        if (!par.empty()) {
+            std::error_code ec;
+            fs::create_directories(par, ec);
+        }
+    }
+
+    // Remove any existing file (stale from previous failed attempt may be locked or partial).
+    {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+
     auto fres = platform::File::open(path, platform::OpenMode::CreateRW);
     if (!fres) return fres.error();
     platform::File file = std::move(fres).value();
@@ -1738,7 +1756,8 @@ CdxIndex::add_tag(const std::string& path,
                   const std::string& key_expr,
                   std::uint16_t      key_size,
                   bool               unique,
-                  bool               descend) {
+                  bool               descend,
+                  const std::string& for_expr) {
     auto fres = platform::File::open(path, platform::OpenMode::OpenExisting);
     if (!fres) return fres.error();
     platform::File file = std::move(fres).value();
