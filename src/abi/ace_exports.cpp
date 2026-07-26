@@ -30968,13 +30968,6 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return ok();
     }
 
-    // M10.46 — when this query was a derived-table outer SELECT,
-    // reuse the inner cursor's existing handle so the user-visible
-    // cursor isn't a stale alias of an already-registered Table*.
-    ADSHANDLE gh = (derived_cur != 0)
-        ? derived_cur
-        : s.registry.register_object(HandleKind::Table, tbl);
-
     // RCB 07/16/2026: column-level permission enforcement. If the connected
     // user is column-restricted on the source table, the cursor must expose
     // ONLY the columns they may SELECT — SAP grants a group table access but
@@ -30997,6 +30990,139 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
         return s;
     };
+
+    // ADS static-cursor semantics — single-table SELECT with ORDER BY /
+    // DISTINCT / LIMIT must be a STANDALONE temp table, not the live source
+    // with a recno_sequence. Real ACE returns a static cursor (its own temp
+    // table) for these; the ERP then runs `INDEX ON ... ; DBSETORDER(n)` on
+    // the result. If the cursor were the live `<source>.dbf`, those index ops
+    // would hit the production table and REWRITE its official .cdx (the user
+    // saw "cualquier SELECT-SQL reescribio los indices originales"), and a
+    // recno_sequence over the live table makes DBSETORDER a no-op for the
+    // browse. Materialising the result into a clean temp DBF (its own recnos
+    // 1..N, its own index space) isolates it from the source: INDEX ON /
+    // DBSETORDER behave exactly like DBFCDX / ADS_CDX. Same shape the
+    // multi-table / union / aggregate / CASE paths already produce.
+    if (derived_cur == 0 && tbl->has_recno_sequence()) {
+        ADSHANDLE conn_h = 0;
+        s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
+            if (k != HandleKind::Connection) return;
+            if (static_cast<Connection*>(p) == c) conn_h = h;
+        });
+        if (conn_h != 0) {
+            std::vector<std::uint16_t> cols;
+            bool col_err = false;
+            bool col_denied = false;
+            if (parsed.value().projection.empty()) {
+                std::uint16_t nf = tbl->field_count();
+                cols.reserve(nf);
+                for (std::uint16_t k = 0; k < nf; ++k) {
+                    // A column-restricted user must not get the hidden columns
+                    // copied into the temp table either (the projection applied
+                    // to a live cursor below can't reach a materialised one).
+                    if (allowed_cols &&
+                        allowed_cols->find(col_lower(
+                            tbl->field_descriptor(k).name)) ==
+                            allowed_cols->end()) {
+                        continue;
+                    }
+                    cols.push_back(k);
+                }
+            } else {
+                cols.reserve(parsed.value().projection.size());
+                for (const auto& cn : parsed.value().projection) {
+                    std::int32_t fi = tbl->field_index(cn);
+                    if (fi < 0) { col_err = true; break; }
+                    if (allowed_cols &&
+                        allowed_cols->find(col_lower(cn)) ==
+                            allowed_cols->end()) {
+                        col_denied = true; break;
+                    }
+                    cols.push_back(static_cast<std::uint16_t>(fi));
+                }
+            }
+            if (col_err) return fail(openads::AE_COLUMN_NOT_FOUND, "");
+            if (col_denied) return fail(openads::AE_ACCESS_DENIED,
+                                        "no column permission");
+            auto type_name = [](char raw) -> const char* {
+                switch (raw) {
+                    case 'C': return "Character";  case 'N': return "Numeric";
+                    case 'D': return "Date";       case 'L': return "Logical";
+                    case 'M': return "Memo";       case 'F': return "Float";
+                    case 'I': return "Integer";    case 'Y': return "Currency";
+                    case 'B': return "Double";     case 'V': return "Varchar";
+                    case 'Q': return "Varbinary";
+                }
+                return "Character";
+            };
+            std::string defs;
+            for (auto cidx : cols) {
+                const auto& fd = tbl->field_descriptor(cidx);
+                if (!defs.empty()) defs.push_back(';');
+                defs += fd.name;
+                defs.push_back(',');
+                defs += type_name(static_cast<char>(fd.raw_type));
+                if (fd.length   > 0) { defs.push_back(','); defs += std::to_string(fd.length); }
+                if (fd.decimals > 0) { defs.push_back(','); defs += std::to_string(fd.decimals); }
+            }
+            char nb[64];
+            std::snprintf(nb, sizeof(nb), "_srt_%llx",
+                          static_cast<unsigned long long>(
+                              openads::platform::monotonic_nanos()));
+            std::string tmp_name = nb;
+            std::vector<UNSIGNED8> name_buf(tmp_name.size() + 1, 0);
+            std::memcpy(name_buf.data(), tmp_name.data(), tmp_name.size());
+            std::vector<UNSIGNED8> def_buf(defs.size() + 1, 0);
+            std::memcpy(def_buf.data(), defs.data(), defs.size());
+            ADSHANDLE hNew = 0;
+            UNSIGNED32 crc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
+                                            ADS_CDX, 0, 0, 0, 0,
+                                            def_buf.data(), &hNew);
+            if (crc == openads::AE_SUCCESS) {
+                openads::engine::Table* tgt =
+                    s.registry.lookup<openads::engine::Table>(
+                        hNew, HandleKind::Table);
+                if (tgt != nullptr) {
+                    std::vector<std::uint32_t> seq = tbl->recno_sequence();
+                    for (std::uint32_t r : seq) {
+                        if (auto g = tbl->goto_record(r); !g) continue;
+                        if (auto ar = tgt->append_record(); !ar) break;
+                        for (std::size_t i = 0; i < cols.size(); ++i) {
+                            auto v = tbl->read_field(cols[i]);
+                            std::string sv =
+                                v ? v.value().as_string : std::string();
+                            (void)tgt->set_field(
+                                static_cast<std::uint16_t>(i), sv);
+                        }
+                    }
+                    (void)tgt->flush();
+                }
+                AdsCloseTable(hNew);
+                // Drop the live source cursor so the ERP's INDEX ON / close
+                // never touches the production table or its official .cdx.
+                if (table_handle != 0) c->close_table(table_handle);
+                auto cth = c->open_table(tmp_name,
+                                         openads::engine::TableType::Cdx,
+                                         openads::engine::OpenMode::Shared);
+                if (!cth) return fail(cth.error());
+                openads::engine::Table* ctbl = c->lookup_table(cth.value());
+                if (!ctbl) return fail(openads::AE_INTERNAL_ERROR,
+                                       "sorted temp post-open");
+                ADSHANDLE gh_srt =
+                    s.registry.register_object(HandleKind::Table, ctbl);
+                *phCursor = gh_srt;
+                return ok();
+            }
+            // AdsCreateTable failed -> fall through to the live-cursor return.
+        }
+    }
+
+    // M10.46 — when this query was a derived-table outer SELECT,
+    // reuse the inner cursor's existing handle so the user-visible
+    // cursor isn't a stale alias of an already-registered Table*.
+    ADSHANDLE gh = (derived_cur != 0)
+        ? derived_cur
+        : s.registry.register_object(HandleKind::Table, tbl);
 
     if (!parsed.value().projection.empty()) {
         std::vector<std::uint16_t> proj;
