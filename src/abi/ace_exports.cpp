@@ -5227,6 +5227,30 @@ connect101_option_tables() {
     return tables;
 }
 
+// Cursor handle -> on-disk stem (no extension) of the temp table a
+// materialised SELECT built for it. AdsCloseTable deletes the stem's files,
+// so a data directory doesn't accumulate one temp per query.
+std::unordered_map<ADSHANDLE, std::string>&
+materialised_cursor_temps() {
+    static std::unordered_map<ADSHANDLE, std::string> temps;
+    return temps;
+}
+
+// Delete the files of a materialised cursor's temp table: the .dbf plus any
+// memo / index companion an application created on it (the ERP runs
+// INDEX ON over the result, producing <stem>.cdx).
+void drop_materialised_cursor_temp(ADSHANDLE h) {
+    auto& m = materialised_cursor_temps();
+    auto it = m.find(h);
+    if (it == m.end()) return;
+    const std::string stem = it->second;
+    m.erase(it);
+    std::error_code ec;
+    for (const char* ext : {".dbf", ".cdx", ".fpt", ".dbt", ".ntx"}) {
+        std::filesystem::remove(std::filesystem::path(stem + ext), ec);
+    }
+}
+
 openads::util::Result<Table> build_connect101_options_table(
     const std::unordered_map<std::string, std::string>& options) {
     struct Col {
@@ -8558,6 +8582,9 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
     }
     cursor_projections().erase(hTable);
     s.registry.release(hTable);
+    // The table is closed and its handle released, so the temp table a
+    // materialised SELECT built for this cursor can go with it.
+    drop_materialised_cursor_temp(hTable);
     return ok();
 }
 
@@ -31110,6 +31137,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                        "sorted temp post-open");
                 ADSHANDLE gh_srt =
                     s.registry.register_object(HandleKind::Table, ctbl);
+                // Tie the temp table's lifetime to the cursor handle: without
+                // this, every SELECT ... ORDER BY leaves a _srt_*.dbf (and any
+                // index the caller built on it) behind in the data directory.
+                materialised_cursor_temps()[gh_srt] =
+                    (std::filesystem::path(c->data_dir()) / tmp_name).string();
                 *phCursor = gh_srt;
                 return ok();
             }
