@@ -58,17 +58,17 @@ DbfFieldType classify_adt_field(std::uint16_t raw_type) {
     }
 }
 
-// Retry-with-backoff lock helper, same pattern as CdxDriver.
+// Retry-with-backoff lock helper (matches CdxDriver signature).
 util::Result<platform::ByteLock>
-acquire_with_retry_(platform::File& f,
-                    std::uint64_t   offset,
-                    std::uint64_t   length,
-                    int             max_retries = 200)
+acquire_with_retry_(platform::File&      f,
+                    std::uint64_t        offset,
+                    std::uint64_t        length,
+                    platform::LockKind   kind = platform::LockKind::Exclusive,
+                    int                  max_retries = 200)
 {
     util::Error last_err{};
     for (int i = 0; i < max_retries; ++i) {
-        auto lk = platform::ByteLock::try_acquire(f, offset, length,
-                                                   platform::LockKind::Exclusive);
+        auto lk = platform::ByteLock::try_acquire(f, offset, length, kind);
         if (lk) return std::move(lk).value();
         last_err = lk.error();
         std::this_thread::sleep_for(
@@ -90,6 +90,13 @@ AdtDriver::open(const std::string& path, DriverOpenMode mode) {
     if (!fres) return fres.error();
     file_ = std::move(fres).value();
 
+    // Coordinate header read with concurrent appenders (who take exclusive
+    // lock on 0..399). Use shared lock + retry so open does not fail with
+    // ERROR_LOCK_VIOLATION (mapped to 5000) while another connection appends.
+    auto hdr_lock = acquire_with_retry_(file_, 0, 400,
+                                        platform::LockKind::Shared);
+    if (!hdr_lock) return hdr_lock.error();
+
     // Read the 400-byte ADT file header.
     std::uint8_t hdr[400]{};
     auto got = file_.read_at(0, hdr, sizeof(hdr));
@@ -110,6 +117,12 @@ AdtDriver::open(const std::string& path, DriverOpenMode mode) {
     if (rec_len_ == 0) {
         return util::Error{5103, 0, "ADT record_length is zero", path};
     }
+
+    // Defensive cap: some .DAT (ADT-format) files may have rec_count_ in
+    // header larger than actual data bytes present (truncate, crash, copy,
+    // prior write bug). Cap it so that seeding loop and all reads stay
+    // within file and never hit "short read" / "out of range" 5000.
+    cap_record_count_from_size_();
 
     // Read all field descriptors (200 bytes each after the 400-byte header).
     std::uint32_t num_fields = (hdr_len_ - 400) / 200;
@@ -194,7 +207,11 @@ void AdtDriver::denormalize_deletion_flag_(std::uint8_t* buf) noexcept {
 util::Result<std::vector<std::uint8_t>>
 AdtDriver::read_record_raw(std::uint32_t recno) {
     if (recno == 0 || recno > rec_count_) {
-        return util::Error{5000, 0, "record number out of range", ""};
+        // Peer may have appended; refresh (shared) + re-cap before failing.
+        if (auto rh = refresh_record_count_shared_(); !rh) return rh.error();
+        if (recno > rec_count_) {
+            return util::Error{5000, 0, "record number out of range", ""};
+        }
     }
     std::vector<std::uint8_t> buf(rec_len_, 0);
     std::uint64_t offset = static_cast<std::uint64_t>(hdr_len_) +
@@ -203,6 +220,11 @@ AdtDriver::read_record_raw(std::uint32_t recno) {
     auto got = file_.read_at(offset, buf.data(), buf.size());
     if (!got) return got.error();
     if (got.value() < buf.size()) {
+        // Re-check size in case a truncate raced; re-cap and re-test.
+        cap_record_count_from_size_();
+        if (recno > rec_count_) {
+            return util::Error{5000, 0, "record number out of range", ""};
+        }
         return util::Error{5000, 0, "short read on ADT record body", ""};
     }
     normalize_deletion_flag_(buf.data());
@@ -216,7 +238,10 @@ AdtDriver::write_record_raw(std::uint32_t recno,
         return util::Error{5000, 0, "table opened read-only", ""};
     }
     if (recno == 0 || recno > rec_count_) {
-        return util::Error{5000, 0, "record number out of range", ""};
+        if (auto rh = refresh_record_count_shared_(); !rh) return rh.error();
+        if (recno > rec_count_) {
+            return util::Error{5000, 0, "record number out of range", ""};
+        }
     }
     if (n != rec_len_) {
         return util::Error{5000, 0, "record buffer length mismatch", ""};
@@ -288,7 +313,28 @@ util::Result<void> AdtDriver::refresh_record_count_() {
             "ADT header truncated during refresh", ""};
     }
     rec_count_ = read_u32_le(buf);
+    cap_record_count_from_size_();
     return {};
+}
+
+util::Result<void> AdtDriver::refresh_record_count_shared_() {
+    // Wait out any exclusive header lock held by an appender, then refresh
+    // (and cap). Mirrors the pattern used by CdxDriver.
+    auto lk = acquire_with_retry_(file_, 0, 400,
+                                  platform::LockKind::Shared);
+    (void)lk;
+    return refresh_record_count_();
+}
+
+void AdtDriver::cap_record_count_from_size_() {
+    auto szr = file_.size();
+    if (!szr) return;
+    auto sz = szr.value();
+    std::uint64_t data_sz = (sz > hdr_len_) ? (sz - hdr_len_) : 0ULL;
+    std::uint32_t phys = (rec_len_ > 0)
+        ? static_cast<std::uint32_t>(data_sz / rec_len_)
+        : 0u;
+    if (rec_count_ > phys) rec_count_ = phys;
 }
 
 util::Result<void> AdtDriver::rewrite_header_() {

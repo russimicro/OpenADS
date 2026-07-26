@@ -3266,18 +3266,22 @@ UNSIGNED32 AdsOpenTable(ADSHANDLE  hConnect,
         }
     }
     // ADI auto-open: same convention for ADT tables — opening `<base>.adt`
-    // auto-binds `<base>.adi` if it exists, so every tag inside it becomes
-    // navigable without an explicit AdsOpenIndex call.
-    if (tp.extension() == ".adt" || tp.extension() == ".ADT") {
-        fs::path adi = tp; adi.replace_extension(".adi");
-        std::error_code ec;
-        if (fs::exists(adi, ec)) {
-            std::string adis = adi.string();
-            std::vector<UNSIGNED8> b(adis.size() + 1);
-            std::memcpy(b.data(), adis.data(), adis.size());
-            ADSHANDLE arr[64] = {0};
-            UNSIGNED16 alen = 64;
-            (void)AdsOpenIndex(gh, b.data(), arr, &alen);
+    // (or `<base>.dat` when ERP keeps ADT data in .DAT + .ADI per ARC-CAJA)
+    // auto-binds `<base>.adi` if it exists.
+    {
+        std::string extl = tp.extension().string();
+        for (auto& ch : extl) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (extl == ".adt" || extl == ".dat") {
+            fs::path adi = tp; adi.replace_extension(".adi");
+            std::error_code ec;
+            if (fs::exists(adi, ec)) {
+                std::string adis = adi.string();
+                std::vector<UNSIGNED8> b(adis.size() + 1);
+                std::memcpy(b.data(), adis.data(), adis.size());
+                ADSHANDLE arr[64] = {0};
+                UNSIGNED16 alen = 64;
+                (void)AdsOpenIndex(gh, b.data(), arr, &alen);
+            }
         }
     }
     return ok();

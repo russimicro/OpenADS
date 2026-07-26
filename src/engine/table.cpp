@@ -1100,19 +1100,11 @@ util::Result<void> Table::pack() {
         }
     }
     // 2) Drop the trailing stale rows. The copy-down above already placed the
-<<<<<<< Updated upstream
     //    survivors at recnos 1..dst, so this is a single header/EOF rewrite +
     //    physical file truncate via truncate_to() — avoiding the read-all + zap
     //    + re-append pass (a full extra I/O pass, with a per-record flush, that
     //    dominated PACK on large tables). Drivers without truncate_to fall back
     //    to that legacy path. Clipper semantics: indexes left stale, caller REINDEXes.
-=======
-    //    survivors at recnos 1..dst, so this is a single header/EOF rewrite via
-    //    truncate_to() — avoiding the read-all + zap + re-append pass (a full
-    //    extra I/O pass, with a per-record flush, that dominated PACK on large
-    //    tables). Drivers without truncate_to fall back to that legacy path.
-    //    Pack matches Clipper semantics: indexes are left stale, caller REINDEXes.
->>>>>>> Stashed changes
     bool truncated = (dst >= total);   // nothing removed → records unchanged
     if (!truncated) {
         auto t = driver_->truncate_to(dst);

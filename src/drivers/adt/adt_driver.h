@@ -60,6 +60,8 @@ public:
 
 private:
     util::Result<void> refresh_record_count_();
+    util::Result<void> refresh_record_count_shared_();
+    void               cap_record_count_from_size_();
     util::Result<void> rewrite_header_();
 
     // Translate a record buffer between ADT on-disk format and the
