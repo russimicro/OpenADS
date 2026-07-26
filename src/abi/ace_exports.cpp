@@ -78,6 +78,7 @@
 #include "drivers/dbf_common.h"
 #include "drivers/index_trait.h"
 #include "drivers/ntx/ntx_index.h"
+#include "drivers/adt/adt_driver.h"
 #include "drivers/cdx/cdx_driver.h"
 #include "drivers/cdx/cdx_index.h"
 #include "drivers/adi/adi_index.h"
@@ -6547,9 +6548,13 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         }
     }
     // ADI auto-open: same convention for ADT tables — opening `<base>.adt`
-    // auto-binds `<base>.adi` if it exists, so every tag inside it becomes
-    // navigable without an explicit AdsOpenIndex call.
-    if (tp.extension() == ".adt" || tp.extension() == ".ADT") {
+    // (or `<base>.dat`, the Russoft ERP convention of keeping ADT data in
+    // .DAT + .ADI per ARC-CAJA) auto-binds `<base>.adi` if it exists, so every
+    // tag inside it becomes navigable without an explicit AdsOpenIndex call.
+    std::string tp_extl = tp.extension().string();
+    for (auto& ch : tp_extl)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (tp_extl == ".adt" || tp_extl == ".dat") {
         fs::path adi = tp; adi.replace_extension(".adi");
         std::error_code ec;
         std::string adi_path =
@@ -12239,7 +12244,15 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         : std::string{};
 
     namespace fs = std::filesystem;
-    const bool is_adt_table = path_ends_with_ci(t->path(), ".adt");
+    // Detect an ADT table by extension (standard) OR by the driver actually
+    // in use: the Russoft ERP keeps ADT data in .DAT files (ExtFile='.DAT')
+    // opened via ADS_ADT, so an extension-only test routes them to .cdx and
+    // the companion .adi is never created.
+    bool is_adt_table = path_ends_with_ci(t->path(), ".adt");
+    if (!is_adt_table &&
+        dynamic_cast<openads::drivers::adt::AdtDriver*>(t->driver()) != nullptr) {
+        is_adt_table = true;
+    }
     const char* default_ext = is_adt_table ? ".adi" : ".cdx";
     fs::path p;
     if (bag.empty()) {
