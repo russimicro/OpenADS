@@ -7142,7 +7142,12 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
 
     if (is_adt) {
         // ── ADT creation path ───────────────────────────────────────────────
-        if (full.extension() != ".adt") full.replace_extension(".adt");
+        // Respect the file name the caller asked for: real ACE creates exactly
+        // that file. Forcing ".adt" broke every app that keeps ADT data under
+        // another extension (the Russoft ERP stores them as .DAT via ExtFile):
+        // COPY TO "CONSEINV.DAT" VIA "ADS" silently produced CONSEINV.adt and
+        // the application then failed to find the table it had just written.
+        // The default extension for an extension-less name is applied above.
 
         std::vector<AdtFieldSpec> specs;
         specs.reserve(fields.size());
@@ -7249,8 +7254,13 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             if (!mr) return fail(mr.error());
         }
 
-        // Open via the standard path so the caller gets a usable handle
-        std::string rel_adt = fs::path(rel).replace_extension(".adt").string();
+        // Open via the standard path so the caller gets a usable handle.
+        // Reopen the file we ACTUALLY created: `full` carries the caller's
+        // extension (or the .adt default when the name had none). Hardcoding
+        // ".adt" here looked for a file that was never written whenever the
+        // caller named the table anything else (e.g. the ERP's .DAT).
+        std::string rel_adt =
+            fs::path(rel).replace_extension(full.extension()).string();
         UNSIGNED8 adt_namebuf[260] = {0};
         std::size_t adt_nb = std::min<std::size_t>(rel_adt.size(),
                                                     sizeof(adt_namebuf) - 1);
