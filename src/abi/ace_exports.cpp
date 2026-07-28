@@ -116,6 +116,7 @@
 #include <utility>
 #include <vector>
 
+
 extern "C++" {
 namespace {
 
@@ -31821,6 +31822,14 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyNum(ADSHANDLE hObj, UNSIGNED16 /*usFilterOption*/
         *pulKeyNum = (pos == 0xFFFFFFFFu) ? 0u : (pos + 1u);
         return ok();
     }
+    // ADI: same O(1) cache. FiveWin's ADS binding reaches this through
+    // AdsKeyNo(,,1) on every browse paint, so the legacy walk below turned
+    // each repaint into a full index traversal on an ADT company.
+    if (auto* adi = dynamic_cast<openads::drivers::adi::AdiIndex*>(idx)) {
+        std::uint32_t pos = adi->pos_of_recno_cached(rn);
+        *pulKeyNum = (pos == 0xFFFFFFFFu) ? 0u : (pos + 1u);
+        return ok();
+    }
     // Non-CDX: legacy O(n) walk (cursor restored).
     idx->invalidate_cursor();
     auto first = idx->seek_first();
@@ -32120,7 +32129,29 @@ UNSIGNED32 ENTRYPOINT AdsGetRelKeyPos(ADSHANDLE h, double* p) {
                  static_cast<double>(walk.size() - 1);
             return ok();
         }
-        // Non-CDX (NTX/ADI): legacy per-call O(n) walk.
+        // Native ADI tag: same O(1) cache as CDX above. Without this branch
+        // an ADT company paid a full index walk on EVERY browse paint —
+        // FiveWin binds bKeyNo to AdsGetRelKeyPos for the ADS RDD
+        // (xbrowse.prg), so opening a 34,595-row table cost ~7.4 ms per call
+        // and seconds per screen, while the same browse over DBFCDX (which
+        // goes through OrdKeyNo) was instant. Measured on the RusSoft ERP,
+        // 2026-07-28.
+        if (auto* adi =
+                dynamic_cast<openads::drivers::adi::AdiIndex*>(idx)) {
+            const auto& walk = adi->ordered_recnos_cached();
+            if (walk.size() <= 1) { *p = 0.0; return ok(); }
+            std::uint32_t pos = adi->pos_of_recno_cached(rn);
+            if (pos == 0xFFFFFFFFu) {
+                if (rn > rc) rn = rc;
+                *p = static_cast<double>(rn - 1) /
+                     static_cast<double>(rc - 1);
+                return ok();
+            }
+            *p = static_cast<double>(pos) /
+                 static_cast<double>(walk.size() - 1);
+            return ok();
+        }
+        // Non-CDX (NTX): legacy per-call O(n) walk.
         idx->invalidate_cursor();
         auto first = idx->seek_first();
         if (!first) return fail(first.error());
@@ -32529,6 +32560,11 @@ UNSIGNED32 ENTRYPOINT AdsSetRelKeyPos(ADSHANDLE h, double pos) {
         if (auto* cdx =
                 dynamic_cast<openads::drivers::cdx::CdxIndex*>(idx)) {
             walkp = &cdx->ordered_recnos_cached();   // O(1) after first build
+        } else if (auto* adi =
+                dynamic_cast<openads::drivers::adi::AdiIndex*>(idx)) {
+            walkp = &adi->ordered_recnos_cached();   // idem — dragging the
+                                                     // scrollbar hits this
+                                                     // once per mouse move
         } else {
             idx->invalidate_cursor();
             auto first = idx->seek_first();
