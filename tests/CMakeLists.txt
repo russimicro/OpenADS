@@ -228,6 +228,7 @@ add_executable(openads_unit_tests
     unit/abi_adi_smoke_test.cpp
     unit/abi_adi_clear_multilevel_test.cpp
     unit/abi_adi_dat_extension_path_test.cpp
+    unit/abi_adi_tagdir_wide_page_test.cpp
     unit/abi_adi_estaelec_compound_test.cpp
     unit/abi_adi_frontcoding_size_test.cpp
     unit/abi_adi_native_estaelec_test.cpp

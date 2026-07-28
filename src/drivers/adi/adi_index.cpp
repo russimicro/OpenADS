@@ -545,9 +545,16 @@ scan_tagdir(platform::File& adi_f) {
 
     for (std::uint16_t i = 0; i < count; ++i) {
         std::size_t off = ADI_TAGDIR_ENTRY_START + i * ADI_TAGDIR_ENTRY_SIZE;
-        if (off + 1 >= ADI_PAGE_SIZE) break;
-        std::uint8_t  xx      = pg2[off];
-        std::uint32_t fmk_pg  = static_cast<std::uint32_t>(xx) + 1u;
+        if (off + ADI_TAGDIR_ENTRY_SIZE > ADI_PAGE_SIZE) break;
+        // Per-tag header page, u32 LE over the entry's first four bytes.
+        // It used to be read (and written) as a single byte, which silently
+        // dropped every tag whose header landed past page 255 — i.e. every
+        // tag but the first, since each add_tag appends its pages at the end
+        // of a bag that is already megabytes long. The three high bytes were
+        // always zero in the old layout, so a u32 read of a legacy entry
+        // yields exactly the byte it used to yield.
+        std::uint32_t xx      = u32_le(pg2.data() + off);
+        std::uint32_t fmk_pg  = xx + 1u;
         std::uint32_t root_pg = fmk_pg + 1u;
 
         auto fmk = read_one_page(adi_f, fmk_pg);
@@ -2084,8 +2091,10 @@ void write_adi_tag_directory_page(AdiIndex::Page& pg,
     pg[23] = 0x06;
 
     // xx=3 → per-tag header page; F-marker page 4; root dense leaf page 5.
-    constexpr std::uint8_t kTagHdrPg = 3;
-    pg[ADI_TAGDIR_ENTRY_START]     = kTagHdrPg;
+    // Written as u32 LE (see scan_tagdir): the first tag always fits in one
+    // byte, later ones do not, and both paths must agree on the width.
+    constexpr std::uint32_t kTagHdrPg = 3;
+    set_u32_le( pg.data() + ADI_TAGDIR_ENTRY_START, kTagHdrPg );
     if (!cp.field_name.empty())
         pg[ADI_TAGDIR_ENTRY_START + 5] =
             static_cast<std::uint8_t>(cp.field_name[0]);
@@ -2409,7 +2418,11 @@ util::Result<AdiIndex> AdiIndex::add_tag(const std::string& adi_path,
     // SAP, so appending is free and keeps DBSETORDER(n) consistent with CDX.
     std::size_t new_off = ADI_TAGDIR_ENTRY_START
                         + static_cast<std::size_t>(count) * ADI_TAGDIR_ENTRY_SIZE;
-    pg2[new_off] = static_cast<std::uint8_t>(hdr_pg);
+    // u32 LE: hdr_pg is a page number in a bag that is already several MB by
+    // the time the second tag is added, so a one-byte store silently lost it
+    // (see scan_tagdir). Entry bytes 1..3 were unused zeros, so widening the
+    // field keeps every existing bag readable.
+    set_u32_le( pg2.data() + new_off, hdr_pg );
     if (!params.field_name.empty())
         pg2[new_off + 5] = static_cast<std::uint8_t>(params.field_name[0]);
     set_u16_le(pg2.data() + 2, count + 1);
