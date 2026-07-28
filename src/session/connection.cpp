@@ -26,6 +26,36 @@
 
 namespace openads::session {
 
+namespace {
+
+// True when `p`'s directory is `base_dir` itself or lives under it.
+// Windows paths are case-insensitive and a caller may spell the same
+// directory with either separator, so normalise before comparing.
+bool path_is_inside(const std::string&           base_dir,
+                    const std::filesystem::path& p) {
+    namespace fs = std::filesystem;
+    if (base_dir.empty()) return false;
+    auto norm = [](const fs::path& in) {
+        std::string s = in.lexically_normal().string();
+        for (auto& ch : s) {
+            if (ch == '\\') ch = '/';
+            ch = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(ch)));
+        }
+        while (!s.empty() && s.back() == '/') s.pop_back();
+        return s;
+    };
+    const std::string base = norm(fs::path(base_dir));
+    const std::string dir  = norm(p.parent_path());
+    if (base.empty() || dir.empty()) return false;
+    if (dir == base) return true;
+    return dir.size() > base.size() &&
+           dir.compare(0, base.size(), base) == 0 &&
+           dir[base.size()] == '/';
+}
+
+}  // namespace
+
 util::Result<Connection> Connection::open(const std::string& data_dir) {
     namespace fs = std::filesystem;
     Connection c;
@@ -97,10 +127,48 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     // file is honored verbatim — SAP opens free tables by full path even
     // on a data-directory connection, and folding those broke every
     // caller that opens a table it just staged at an absolute location
-    // (the DD field-property fixtures do exactly that). CREATE never
-    // takes this branch: a new table always lands under data_dir_.
+    // (the DD field-property fixtures do exactly that).
+    //
+    // CREATE exception: an absolute path whose directory IS data_dir_ (or
+    // sits under it) is honored verbatim too. Folding it unconditionally
+    // re-rooted the client path under the data dir and produced a
+    // duplicated, non-existent directory --
+    //   data_dir_ F:\z\BASES\ + rel F:\z\BASES\T.DAT -> F:\z\BASES\z\BASES\T.DAT
+    // -- so the create failed with "ADT open for write failed" and
+    // AdsGetLastError()==0. That is every Harbour rddads caller doing
+    // COPY TO <full path> VIA "ADS", which is how an ERP names its own
+    // company directory. The intent above still holds: the table always
+    // lands under data_dir_; this branch only recognises that the caller
+    // already spelled that same location.
     fs::path rel = fs::path(effective);
     if (rel.is_absolute() || rel.has_root_directory()) {
+        if (for_create) {
+            // Honour the caller's absolute path when it names a directory that
+            // exists -- which is what the real ACE engine does: a free-table
+            // create writes exactly the file it was given. Applications stage
+            // work tables outside the data directory all the time (the Russoft
+            // ERP builds its scratch copies under the TEMP drive and then
+            // reads them back by the same absolute name), and folding those
+            // produced a path whose intermediate directories nobody creates,
+            // so the create failed and the caller could never find its table.
+            //
+            // The fold below still applies when the directory does NOT exist:
+            // that is the case the guard above was written for -- a client
+            // passing a path from its own working directory that means nothing
+            // on the server -- and re-rooting it under data_dir_ keeps such a
+            // table inside the directory the server owns.
+            // A path rooted directly at a drive ("C:\STRAY.DBF") is excluded:
+            // the drive root always exists, but writing a table there is never
+            // a deliberate location -- it is the signature of a client that
+            // built the name from its own root. Those keep being folded.
+            std::error_code ec;
+            const fs::path parent = rel.parent_path();
+            const bool parent_is_drive_root = (parent == parent.root_path());
+            if (path_is_inside(data_dir_, rel) ||
+                (!parent_is_drive_root && fs::is_directory(parent, ec))) {
+                return platform::resolve_case_insensitive(rel.string());
+            }
+        }
         if (!for_create) {
             std::error_code ec;
             fs::path cand = rel;
