@@ -215,6 +215,20 @@ public:
     util::Result<void> recall_deleted();
     bool               is_deleted() const noexcept;
 
+    // Deletion flag of an ARBITRARY record, without moving the cursor and
+    // without disturbing the driver's read-ahead.
+    //
+    // goto_record() invalidates the read cache on every call -- it has to, an
+    // absolute reposition must see what another writer just wrote. That is
+    // right for navigation and ruinous for counting: walking an index to
+    // exclude deleted rows through goto_record() turns a sequential scan into
+    // one block read per record (measured on an ADT table of 34,595 rows:
+    // OrdKeyCount() 1,381 ms with SET DELETED ON against 9 ms with it OFF,
+    // and no reuse between calls). Reading the record through the normal
+    // read path keeps the read-ahead block warm, so the same walk stays
+    // sequential.
+    util::Result<bool> deleted_at(std::uint32_t recno);
+
     // True only when a concrete record is loaded (not BOF/EOF/Limbo).
     bool positioned() const noexcept { return state_ == State::Positioned; }
 
