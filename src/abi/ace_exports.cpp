@@ -33452,19 +33452,35 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
             if (hide_del && saved_rn != 0) (void)t->goto_record(saved_rn);
             return ok();
         }
-        // NTX: use cached B-tree walk for correct conditional count
-        if (auto* ntx =
-                dynamic_cast<openads::drivers::ntx::NtxIndex*>(ord->index())) {
-            *pulCount = static_cast<UNSIGNED32>(
-                ntx->ordered_recnos_cached().size());
-            return ok();
-        }
-        // ADI: use cached B-tree walk for correct conditional count
-        if (auto* adi =
-                dynamic_cast<openads::drivers::adi::AdiIndex*>(ord->index())) {
-            *pulCount = static_cast<UNSIGNED32>(
-                adi->ordered_recnos_cached().size());
-            return ok();
+        // NTX / ADI: same cached walk as CDX above, and — as above — the
+        // count must exclude deleted records while SET DELETED is ON.
+        // Returning the raw walk size made OrdKeyCount() disagree with the
+        // same table under DBFCDX as soon as anything was deleted, and a
+        // browse sizes its scrollbar from it.
+        {
+            const std::vector<std::uint32_t>* walk = nullptr;
+            if (auto* ntx =
+                    dynamic_cast<openads::drivers::ntx::NtxIndex*>(ord->index()))
+                walk = &ntx->ordered_recnos_cached();
+            else if (auto* adi =
+                    dynamic_cast<openads::drivers::adi::AdiIndex*>(ord->index()))
+                walk = &adi->ordered_recnos_cached();
+
+            if (walk != nullptr) {
+                const bool hide_del = !t->show_deleted_records();
+                if (!hide_del) {
+                    *pulCount = static_cast<UNSIGNED32>(walk->size());
+                    return ok();
+                }
+                const std::uint32_t saved_rn = t->recno();
+                std::uint32_t n = 0;
+                for (std::uint32_t rn : *walk) {
+                    if (t->goto_record(rn) && !t->is_deleted()) ++n;
+                }
+                *pulCount = n;
+                if (saved_rn != 0) (void)t->goto_record(saved_rn);
+                return ok();
+            }
         }
     }
     *pulCount = t->record_count();
