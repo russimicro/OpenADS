@@ -47,7 +47,30 @@ fs::path stage_dbf(const fs::path& dir) {
     return p;
 }
 
-std::vector<UNSIGNED32> walk(ADSHANDLE hCur) {
+// Walk the cursor and collect TAG field values (the ordered data). After
+// #136 ORDER BY materialises a static cursor, recnos are positional 1..N
+// rather than source recnos — so tests assert sorted *data*, not source
+// record numbers.
+std::vector<std::string> walk_tags(ADSHANDLE hCur) {
+    std::vector<std::string> out;
+    if (AdsGotoTop(hCur) != 0) return out;
+    UNSIGNED8 fld[8] = "TAG";
+    while (true) {
+        UNSIGNED16 atend = 0;
+        if (AdsAtEOF(hCur, &atend) != 0 || atend) break;
+        UNSIGNED8 buf[16] = {0};
+        UNSIGNED32 cap = sizeof(buf);
+        if (AdsGetField(hCur, fld, buf, &cap, 0) != 0) break;
+        std::string s(reinterpret_cast<char*>(buf), cap);
+        while (!s.empty() && s.back() == ' ') s.pop_back();
+        out.push_back(std::move(s));
+        if (AdsSkip(hCur, 1) != 0) break;
+    }
+    return out;
+}
+
+// Positional recnos on a materialised cursor must be 1..N in walk order.
+std::vector<UNSIGNED32> walk_recnos(ADSHANDLE hCur) {
     std::vector<UNSIGNED32> out;
     if (AdsGotoTop(hCur) != 0) return out;
     while (true) {
@@ -56,27 +79,6 @@ std::vector<UNSIGNED32> walk(ADSHANDLE hCur) {
         UNSIGNED32 r = 0;
         if (AdsGetRecordNum(hCur, 0, &r) != 0) break;
         out.push_back(r);
-        if (AdsSkip(hCur, 1) != 0) break;
-    }
-    return out;
-}
-
-// An ORDER BY cursor is a materialised static cursor with its own recnos
-// 1..N, so the row identity to assert is the DATA, not the source recno.
-std::vector<std::string> walk_col(ADSHANDLE hCur, const char* col) {
-    std::vector<std::string> out;
-    if (AdsGotoTop(hCur) != 0) return out;
-    while (true) {
-        UNSIGNED16 atend = 0;
-        if (AdsAtEOF(hCur, &atend) != 0 || atend) break;
-        UNSIGNED8 f[32]{};
-        std::strncpy(reinterpret_cast<char*>(f), col, 31);
-        UNSIGNED8 buf[64]{};
-        UNSIGNED32 len = sizeof(buf);
-        if (AdsGetString(hCur, f, buf, &len, ADS_NONE) != 0) break;
-        std::string v(reinterpret_cast<char*>(buf), len);
-        while (!v.empty() && v.back() == ' ') v.pop_back();
-        out.push_back(v);
         if (AdsSkip(hCur, 1) != 0) break;
     }
     return out;
@@ -102,20 +104,20 @@ TEST_CASE("M10.6 SQL ORDER BY ascending walks rows in sorted order") {
     ADSHANDLE hCur = 0;
     REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
 
-    // Source order is CCCC, AAAA, DDDD, BBBB; the cursor must walk it sorted.
-    auto vals = walk_col(hCur, "TAG");
-    REQUIRE(vals.size() == 4);
-    CHECK(vals[0] == "AAAA");
-    CHECK(vals[1] == "BBBB");
-    CHECK(vals[2] == "CCCC");
-    CHECK(vals[3] == "DDDD");
-    // Static cursor: its own recnos, in result order.
-    auto seq = walk(hCur);
-    REQUIRE(seq.size() == 4);
-    CHECK(seq[0] == 1);
-    CHECK(seq[1] == 2);
-    CHECK(seq[2] == 3);
-    CHECK(seq[3] == 4);
+    auto tags = walk_tags(hCur);
+    // Sorted data: AAAA, BBBB, CCCC, DDDD (source recnos were 2,4,1,3).
+    REQUIRE(tags.size() == 4);
+    CHECK(tags[0] == "AAAA");
+    CHECK(tags[1] == "BBBB");
+    CHECK(tags[2] == "CCCC");
+    CHECK(tags[3] == "DDDD");
+    // Materialised cursor: positional recnos 1..N, not source recnos.
+    auto recs = walk_recnos(hCur);
+    REQUIRE(recs.size() == 4);
+    CHECK(recs[0] == 1);
+    CHECK(recs[1] == 2);
+    CHECK(recs[2] == 3);
+    CHECK(recs[3] == 4);
 
     REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
@@ -140,12 +142,12 @@ TEST_CASE("M10.6 SQL ORDER BY DESC reverses the order") {
     ADSHANDLE hCur = 0;
     REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
 
-    auto vals = walk_col(hCur, "TAG");
-    REQUIRE(vals.size() == 4);
-    CHECK(vals[0] == "DDDD");
-    CHECK(vals[1] == "CCCC");
-    CHECK(vals[2] == "BBBB");
-    CHECK(vals[3] == "AAAA");
+    auto tags = walk_tags(hCur);
+    REQUIRE(tags.size() == 4);
+    CHECK(tags[0] == "DDDD");
+    CHECK(tags[1] == "CCCC");
+    CHECK(tags[2] == "BBBB");
+    CHECK(tags[3] == "AAAA");
 
     REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
@@ -218,20 +220,35 @@ TEST_CASE("M10.37 multi-column ORDER BY cascades on ties") {
     REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
 
     // ORDER BY CITY ASC, PR DESC.
-    // CITY=LON: PR 20,10 → DESC = 20,10 → recnos 1, 2
-    // CITY=NYC: PR 30,20,10 → DESC = 30,20,10 → recnos 3, 4, 5
+    // CITY=LON: PR 20,10 → DESC = 20 then 10
+    // CITY=NYC: PR 30,20,10 → DESC = 30, 20, 10
     UNSIGNED8 sql[200] =
         "SELECT * FROM data.dbf ORDER BY CITY ASC, PR DESC";
     ADSHANDLE hCur = 0;
     REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
 
-    auto seq = walk(hCur);
-    REQUIRE(seq.size() == 5);
-    CHECK(seq[0] == 1);
-    CHECK(seq[1] == 2);
-    CHECK(seq[2] == 3);
-    CHECK(seq[3] == 4);
-    CHECK(seq[4] == 5);
+    // Materialised cursor: positional recnos 1..5 in sort order.
+    auto recs = walk_recnos(hCur);
+    REQUIRE(recs.size() == 5);
+    CHECK(recs[0] == 1);
+    CHECK(recs[1] == 2);
+    CHECK(recs[2] == 3);
+    CHECK(recs[3] == 4);
+    CHECK(recs[4] == 5);
+    // Verify PR values follow DESC within each CITY.
+    UNSIGNED8 fld_pr[8] = "PR";
+    REQUIRE(AdsGotoTop(hCur) == 0);
+    const char* expect_pr[] = {"20", "10", "30", "20", "10"};
+    for (int i = 0; i < 5; ++i) {
+        UNSIGNED8 buf[8] = {0};
+        UNSIGNED32 cap = sizeof(buf);
+        REQUIRE(AdsGetField(hCur, fld_pr, buf, &cap, 0) == 0);
+        std::string s(reinterpret_cast<char*>(buf), cap);
+        while (!s.empty() && s.back() == ' ') s.pop_back();
+        while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+        CHECK(s == expect_pr[i]);
+        if (i < 4) REQUIRE(AdsSkip(hCur, 1) == 0);
+    }
 
     REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
@@ -252,17 +269,17 @@ TEST_CASE("M10.6 SQL ORDER BY combines with WHERE") {
     ADSHANDLE hStmt = 0;
     REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
 
-    // TAG > 'AAAA' drops AAAA. ORDER BY TAG → BBBB, CCCC, DDDD.
+    // TAG > 'AAAA' filters to BBBB, CCCC, DDDD; ORDER BY TAG sorts them.
     UNSIGNED8 sql[200] =
         "SELECT * FROM data.dbf WHERE TAG > 'AAAA' ORDER BY TAG";
     ADSHANDLE hCur = 0;
     REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
 
-    auto vals = walk_col(hCur, "TAG");
-    REQUIRE(vals.size() == 3);
-    CHECK(vals[0] == "BBBB");
-    CHECK(vals[1] == "CCCC");
-    CHECK(vals[2] == "DDDD");
+    auto tags = walk_tags(hCur);
+    REQUIRE(tags.size() == 3);
+    CHECK(tags[0] == "BBBB");
+    CHECK(tags[1] == "CCCC");
+    CHECK(tags[2] == "DDDD");
 
     REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);

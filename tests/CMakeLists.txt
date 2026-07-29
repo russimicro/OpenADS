@@ -49,6 +49,7 @@ add_executable(openads_unit_tests
     unit/session_connection_test.cpp
     unit/abi_smoke_test.cpp
     unit/abi_write_smoke_test.cpp
+    unit/abi_pritpal_lock_test.cpp
     unit/ntx_index_test.cpp
     unit/cdx_index_test.cpp
     unit/engine_order_test.cpp
@@ -96,6 +97,7 @@ add_executable(openads_unit_tests
     unit/abi_index_expr_validation_test.cpp
     unit/abi_zap_pack_test.cpp
     unit/abi_pack_reindex_softseek_test.cpp
+    unit/abi_stale_index_walk_test.cpp
     unit/abi_ntx_pack_reindex_test.cpp
     unit/abi_ntx_pack_reindex_multipage_test.cpp
     unit/abi_ntx_multipage_dup_test.cpp
@@ -173,6 +175,7 @@ add_executable(openads_unit_tests
     unit/abi_remote_index_nav_test.cpp
     unit/abi_remote_prodcdx_test.cpp
     unit/abi_append_autolock_test.cpp
+    unit/abi_lock_comprehensive_test.cpp
     unit/abi_get_set_record_test.cpp
     unit/abi_set_relation_test.cpp
     unit/abi_record_crc_aof_test.cpp
@@ -274,6 +277,7 @@ add_executable(openads_unit_tests
     unit/abi_fetch_where_test.cpp
     unit/backend_tier1_test.cpp
     unit/abi_oads_file_funcs_test.cpp
+    unit/abi_create_index_path_test.cpp
 )
 
 # OpenADS ODBC driver (provider) test — drives the driver's SQL* exports

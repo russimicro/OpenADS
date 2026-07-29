@@ -1,5 +1,9 @@
 #include "openads/ace.h"
 #include "openads/error.h"
+#include "abi/lock_retry_policy.h"
+
+// Expose lock_retry_policy() at file scope so ADS_SETLOCKCYCLE etc. can use it.
+using openads::abi::lock_retry_policy;
 
 #include <atomic>
 #include <condition_variable>
@@ -11073,25 +11077,14 @@ UNSIGNED32 ENTRYPOINT AdsSetDate(ADSHANDLE hTable, UNSIGNED8* pucField,
 // policy (the hConnect arg is accepted for ABI compat but the value is
 // shared across connections in this build); the retry loop sleeps
 // `cycle_ms` between attempts and gives up after `retry_count` cycles.
+// LockPolicy and lock_retry_policy() are defined in abi/lock_retry_policy.h.
 
 namespace {
 
-struct LockPolicy {
-    UNSIGNED32 cycle_ms    = 100;   // ACE default
-    UNSIGNED16 retry_count = 10;
-};
-
-// extern "C++" silences clang's `-Wreturn-type-c-linkage` warning
-// (returning an anonymous-namespace type from inside the surrounding
-// extern "C" block isn't ABI-meaningful, but is harmless here since
-// `lock_policy` is only called from C++ code in this TU).
-extern "C++" LockPolicy& lock_policy() {
-    static LockPolicy p;
-    return p;
-}
+using openads::abi::lock_retry_policy;
 
 UNSIGNED32 lock_with_retry(std::function<openads::util::Result<void>()> fn) {
-    LockPolicy p = lock_policy();
+    auto p = openads::abi::lock_retry_policy();
     for (UNSIGNED16 i = 0; ; ++i) {
         auto r = fn();
         if (r) return openads::AE_SUCCESS;
@@ -11108,7 +11101,7 @@ UNSIGNED32 lock_with_retry(std::function<openads::util::Result<void>()> fn) {
 UNSIGNED32 ENTRYPOINT AdsSetLockCycle(ADSHANDLE /*hConnect*/, UNSIGNED32 ulCycle) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    lock_policy().cycle_ms = ulCycle;
+    lock_retry_policy().cycle_ms = ulCycle;
     return ok();
 }
 
@@ -11116,14 +11109,14 @@ UNSIGNED32 ENTRYPOINT AdsGetLockCycle(ADSHANDLE /*hConnect*/, UNSIGNED32* pulCyc
     if (pulCycle == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    *pulCycle = lock_policy().cycle_ms;
+    *pulCycle = lock_retry_policy().cycle_ms;
     return ok();
 }
 
 UNSIGNED32 ENTRYPOINT AdsSetLockRetryCount(ADSHANDLE /*hConnect*/, UNSIGNED16 usRetryCount) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    lock_policy().retry_count = usRetryCount;
+    lock_retry_policy().retry_count = usRetryCount;
     return ok();
 }
 
@@ -11131,7 +11124,7 @@ UNSIGNED32 ENTRYPOINT AdsGetLockRetryCount(ADSHANDLE /*hConnect*/, UNSIGNED16* p
     if (pusRetryCount == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    *pusRetryCount = lock_policy().retry_count;
+    *pusRetryCount = lock_retry_policy().retry_count;
     return ok();
 }
 
@@ -11661,16 +11654,15 @@ bool path_ends_with_ci(const std::string& s, const char* suffix) {
 }
 
 // Harbour/FiveWin may pass a client-native fully qualified path (for example
-// C:\\work\\table.cdx) even when the table is remote. Normalize separators
-// everywhere; a Windows drive path received by a POSIX server cannot refer to
-// the client's filesystem, so remote callers use its basename in the table's
-// server-side directory.
+// C:\\work\\table.cdx) or a relative path with subdirectories (for example
+// MyNewFolder\\table.cdx) even when the table is remote. Normalize separators
+// everywhere.  For remote callers, always strip to basename: the server
+// resolves the index path relative to the table's own directory, so sending
+// a path that already contains the table's subdirectory would cause
+// double-nesting (MyNewFolder/MyNewFolder/table.cdx).
 std::string normalize_index_path(std::string path, bool remote) {
     std::replace(path.begin(), path.end(), '\\', '/');
-    const bool drive_path = path.size() >= 3 &&
-        std::isalpha(static_cast<unsigned char>(path[0])) &&
-        path[1] == ':' && path[2] == '/';
-    if (remote && drive_path)
+    if (remote)
         path = std::filesystem::path(path).filename().string();
     return path;
 }
@@ -13011,6 +13003,24 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
                     "AdsCreateIndex: expression must be a bare field name");
     }
     std::uint16_t klen = t->field_descriptor(static_cast<std::uint16_t>(fidx)).length;
+
+    // Path resolution: mirror AdsCreateIndex61 so the legacy wrapper handles
+    // empty bag names, relative paths, and missing extensions the same way.
+    namespace fs = std::filesystem;
+    {
+        fs::path p;
+        if (file.empty()) {
+            p = fs::path(t->path()).replace_extension(".cdx");
+        } else {
+            p = fs::path(file);
+            if (!p.is_absolute()) {
+                fs::path tdir = fs::path(t->path()).parent_path();
+                p = tdir / p;
+            }
+            if (!p.has_extension()) p.replace_extension(".cdx");
+        }
+        file = p.string();
+    }
 
     std::unique_ptr<openads::drivers::IIndex> idx;
     if (path_ends_with_ci(file, ".cdx")) {
@@ -18399,6 +18409,19 @@ openads::engine::LockingMode stmt_locking_mode(const SqlStatement& s) {
            : openads::engine::LockingMode::Compatible;
 }
 
+// SQL DML (UPDATE/DELETE/INSERT/MERGE) opens tables Shared so multiuser
+// readers can coexist, but writeback_record_() enforces a GoHot lock guard
+// in Shared mode. Without an engine-held lock every SET/DELETE hits 5035
+// "record not locked" — which broke AFTER-trigger bodies (UPDATE log SET…),
+// plain SQL DML, NewSeqKey, and the unit suite after the write-guard landed
+// (issue #138). Hold a table-exclusive lock for the life of the statement,
+// matching the RI cascade path. Navigational multiuser still requires an
+// explicit RLock/FLock; that contract is covered by engine_table_write_test.
+inline void sql_dml_hold_write_lock(openads::engine::Table* tbl) {
+    if (tbl == nullptr || tbl->is_table_locked()) return;
+    (void)tbl->try_lock_table_excl();
+}
+
 } // namespace
 
 } // extern "C++"
@@ -18634,7 +18657,9 @@ extract_system_table_filter_(const openads::sql::SelectStmt& st) {
         if (col == "grantee") {
             filter.grantee = cmp.literal;
             found = true;
-        } else if (col == "obj_name") {
+        } else if (col == "obj_name" || col == "name") {
+            // "name" is the SAP column name for the object in
+            // system.permissions (OpenADS renamed OBJ_NAME → Name).
             filter.object_name = cmp.literal;
             found = true;
         } else if (col == "table_name") {
@@ -18714,8 +18739,13 @@ build_memory_result(const std::string& tag,
             const auto& f = fields[ci];
             std::uint8_t* dst = rec.data() + f.record_offset;
             if (f.type == openads::drivers::DbfFieldType::Integer) {
-                std::int32_t iv = val.empty() ? 0
-                    : static_cast<std::int32_t>(std::stol(val));
+                // Guard non-numeric text (e.g. an RI rule stored as a word)
+                // — std::stol would throw across the ABI boundary and crash.
+                std::int32_t iv = 0;
+                if (!val.empty()) {
+                    try { iv = static_cast<std::int32_t>(std::stol(val)); }
+                    catch (...) { iv = 0; }
+                }
                 auto uiv = static_cast<std::uint32_t>(iv);
                 dst[0] = static_cast<std::uint8_t>( uiv        & 0xFFu);
                 dst[1] = static_cast<std::uint8_t>((uiv >>  8) & 0xFFu);
@@ -19205,20 +19235,20 @@ build_system_table(Connection* c, std::string sys_name,
         // OpenADS cannot decode.  We therefore treat the SAP sentinel as
         // granting full DML for group records.
         const std::vector<Col> cols = {
-            {"OBJ_NAME",  'C', 200, 0},
-            {"OBJ_TYPE",  'N',   3, 0},
-            {"PARENT",    'C', 200, 0},
-            {"GRANTEE",   'C', 200, 0},
-            {"SELECT",    'C',   1, 0},
-            {"UPDATE",    'C',   1, 0},
-            {"INSERT",    'C',   1, 0},
-            {"DELETE",    'C',   1, 0},
-            {"EXECUTE",   'C',   1, 0},
-            {"ACCESS",    'C',   1, 0},
-            {"INHERIT",   'C',   1, 0},
-            {"CREATE",    'C',   1, 0},
-            {"ALTER",     'C',   1, 0},
-            {"DROP",      'C',   1, 0},
+            {"Name",        'C', 200, 0},
+            {"Object_Type", 'N',   3, 0},
+            {"Parent",      'C', 200, 0},
+            {"Grantee",     'C', 200, 0},
+            {"Select",      'C',   1, 0},
+            {"Update",      'C',   1, 0},
+            {"Insert",      'C',   1, 0},
+            {"Delete",      'C',   1, 0},
+            {"Execute",     'C',   1, 0},
+            {"Access",      'C',   1, 0},
+            {"Inherit",     'C',   1, 0},
+            {"Create",      'C',   1, 0},
+            {"Alter",       'C',   1, 0},
+            {"Drop",        'C',   1, 0},
         };
 
         const uint32_t SAP_SENTINEL = 0x80000000u;
@@ -19251,194 +19281,133 @@ build_system_table(Connection* c, std::string sys_name,
 
         std::vector<std::vector<std::string>> rows;
 
-        auto top_key = [](const std::string& grantee,
-                          const std::string& obj_name,
-                          const std::string& type_code) -> std::string {
-            return grantee + '\x1f' + obj_name + '\x1f' + type_code;
+        // --- Canonical SAP permission matrix -------------------------------
+        // SAP renders system.permissions as a full grantee x object cross
+        // product (uniform: every grantee lists every object).  Grantees =
+        // real users + real groups + the two server pseudo-groups
+        // (SERVER:Admin / SERVER:Monitor); the adssys admin is omitted, as SAP
+        // does.  Objects = every table and every one of its columns, plus
+        // users, groups, stored procedures, functions and links, plus a
+        // per-category "root" node SAP always lists (TABLE / VIEW / USER /
+        // USER GROUP / PROCEDURE / LINK / PUBLICATION / SUBSCRIPTION / PACKAGE
+        // and the Database singleton).  Every cell renders "0"/"1"/"2", never
+        // blank, matching SAP.
+        auto is_adssys = [](const std::string& n) {
+            return openads::engine::DataDict::ci_name(n) == "adssys";
         };
 
-        auto emit_top_row = [&](const std::string& obj_name,
-                                const std::string& type_code,
-                                const std::string& obj_type,
-                                const std::string& grantee,
-                                bool is_grp,
-                                uint32_t m) {
-            bool is_table    = (obj_type == "Table");
-            bool is_exec     = (obj_type == "StoredProc" || obj_type == "Function");
-            bool is_obj_user = (obj_type == "User"  || obj_type == "Group");
-            bool is_db       = (obj_type == "Database");
-
-            bool show_dml    = (is_table || is_db);
-            bool show_exec   = (is_exec  || is_db);
-            bool show_inherit = !is_grp && !is_obj_user;
-            auto inherit_val  = [&]() -> std::string {
-                if (!show_inherit) return "";
-                bool set = (m & SAP_SENTINEL) || (m & 0x008u);
-                return set ? "1" : "0";
-            };
-            auto alt_val = [&]() -> std::string {
-                if (is_obj_user || is_exec) return "";
-                if (m & SAP_SENTINEL) return perm_val(is_grp, is_grp);
-                return perm_val((m >> 8) & 1u, is_grp);
-            };
-            auto drop_val = [&]() -> std::string {
-                if (is_obj_user) return "";
-                if (m & SAP_SENTINEL) return perm_val(is_grp, is_grp);
-                return perm_val((m >> 9) & 1u, is_grp);
-            };
-
-            rows.push_back({
-                obj_name,
-                type_code,
-                "",
-                grantee,
-                show_dml  ? dml_col(m, is_grp, 0)  : "",
-                show_dml  ? dml_col(m, is_grp, 1)  : "",
-                show_dml  ? dml_col(m, is_grp, 4)  : "",
-                show_dml  ? dml_col(m, is_grp, 5)  : "",
-                show_exec ? exe_col(m, is_grp)      : "",
-                (is_db && is_grp) ? dml_col(m, is_grp, 6) : "",
-                inherit_val(),
-                (is_db && is_grp) ? dml_col(m, is_grp, 7) : "",
-                alt_val(),
-                drop_val(),
-            });
+        struct MtxGrantee { std::string name; bool is_group; };
+        std::vector<MtxGrantee> grantees;
+        std::unordered_set<std::string> gseen;
+        auto add_grantee = [&](const std::string& n, bool grp) {
+            if (is_adssys(n)) return;
+            if (filter && filter->grantee &&
+                openads::engine::DataDict::ci_name(n) !=
+                    openads::engine::DataDict::ci_name(*filter->grantee))
+                return;
+            if (gseen.insert(openads::engine::DataDict::ci_name(n)).second)
+                grantees.push_back({n, grp});
         };
+        for (const auto& u : dd->users())  add_grantee(u, false);
+        for (const auto& g : dd->groups()) add_grantee(g, true);
+        add_grantee("SERVER:Admin",   true);
+        add_grantee("SERVER:Monitor", true);
 
-        std::unordered_set<std::string> seen_top;
-        std::vector<const openads::engine::DataDict::PermissionEntry*> perm_src;
-        if (filter && filter->grantee && filter->object_name) {
-            auto by_grantee = dd->permissions_by_grantee(*filter->grantee);
-            perm_src.reserve(by_grantee.size());
-            const auto obj_ci = openads::engine::DataDict::ci_name(*filter->object_name);
-            for (const auto* pe : by_grantee) {
-                if (openads::engine::DataDict::ci_name(pe->object_name) == obj_ci)
-                    perm_src.push_back(pe);
-            }
-        } else if (filter && filter->grantee) {
-            auto by_grantee = dd->permissions_by_grantee(*filter->grantee);
-            perm_src.assign(by_grantee.begin(), by_grantee.end());
-        } else if (filter && filter->object_name) {
-            auto by_object = dd->permissions_by_object(*filter->object_name);
-            perm_src.assign(by_object.begin(), by_object.end());
-        } else {
-            perm_src.reserve(dd->permissions().size());
-            for (const auto& pe : dd->permissions())
-                perm_src.push_back(&pe);
-        }
-
-        for (const auto* pe_ptr : perm_src) {
-            const auto& pe = *pe_ptr;
-            const std::string type_code = std::to_string(pe.object_type_code);
-            if (!seen_top.insert(top_key(pe.grantee, pe.object_name,
-                                         type_code)).second)
-                continue;
-            emit_top_row(pe.object_name, type_code, pe.object_type,
-                         pe.grantee, pe.grantee_is_group, pe.bitmask);
-
-            // Field-level rows: OBJ_TYPE=4, PARENT=table.  Skip fields that
-            // only carry the binary-load ordinal placeholder (not registered
-            // FIELDPROP / DD field metadata).
-            if (pe.object_type == "Table") {
-                auto fp_it = dd->field_props().find(pe.object_name);
-                if (fp_it != dd->field_props().end()) {
-                    std::vector<std::string> fnames;
-                    fnames.reserve(fp_it->second.size());
-                    for (const auto& [fn, fprops] : fp_it->second) {
-                        if (fprops.size() == 1 && fprops.count("ordinal"))
-                            continue;
-                        fnames.push_back(fn);
-                    }
-                    std::sort(fnames.begin(), fnames.end());
-                    std::string fsel = dml_col(pe.bitmask, pe.grantee_is_group, 0);
-                    std::string fupd = dml_col(pe.bitmask, pe.grantee_is_group, 1);
-                    std::string fins = dml_col(pe.bitmask, pe.grantee_is_group, 4);
-                    for (const auto& fname : fnames) {
-                        rows.push_back({
-                            fname,
-                            "4",
-                            pe.object_name,
-                            pe.grantee,
-                            fsel,
-                            fupd,
-                            fins,
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                        });
-                    }
-                }
-            }
-        }
-
-        // Legacy parity: emit a zero-permission row for every (grantee, object)
-        // pair that has no Permission record (flag columns "0", not omitted).
-        struct SecObj {
+        struct MtxObj {
             std::string name;
-            std::string type;
-            std::string code;
+            std::string parent;   // table name for fields; "" otherwise
+            int         type;     // SAP Object_Type code
         };
-        std::vector<SecObj> objects;
-        objects.reserve(dd->tables().size() + dd->views().size() +
-                        dd->procs().size() + dd->functions().size() +
-                        dd->links().size() + 8);
-        for (const auto& [alias, _] : dd->tables())
-            objects.push_back({alias, "Table", "1"});
-        for (const auto& [name, _] : dd->views())
-            objects.push_back({name, "View", "6"});
-        for (const auto& [name, _] : dd->procs())
-            objects.push_back({name, "StoredProc", "10"});
-        for (const auto& [name, _] : dd->functions())
-            objects.push_back({name, "Function", "18"});
-        for (const auto& [alias, _] : dd->links())
-            objects.push_back({alias, "Link", "12"});
-        for (const auto& u : dd->users())
-            objects.push_back({u, "User", "8"});
-        for (const auto& g : dd->groups())
-            objects.push_back({g, "Group", "9"});
-        if (!dd->users().empty() || !dd->groups().empty())
-            objects.push_back({"Database", "Database", "11"});
+        std::vector<MtxObj> objects;
+        auto add_obj = [&](const std::string& n, const std::string& parent,
+                           int type) {
+            if (filter && filter->object_name &&
+                openads::engine::DataDict::ci_name(n) !=
+                    openads::engine::DataDict::ci_name(*filter->object_name))
+                return;
+            objects.push_back({n, parent, type});
+        };
 
-        struct Grantee { std::string name; bool is_group; };
-        std::vector<Grantee> grantees;
-        grantees.reserve(dd->users().size() + dd->groups().size());
-        for (const auto& u : dd->users()) {
-            if (filter && filter->grantee &&
-                openads::engine::DataDict::ci_name(u) !=
-                    openads::engine::DataDict::ci_name(*filter->grantee))
-                continue;
-            grantees.push_back({u, false});
-        }
-        for (const auto& g : dd->groups()) {
-            if (filter && filter->grantee &&
-                openads::engine::DataDict::ci_name(g) !=
-                    openads::engine::DataDict::ci_name(*filter->grantee))
-                continue;
-            grantees.push_back({g, true});
-        }
-
-        // RCB 06/30/2026: Direct permission existence is now checked through
-        // DataDict's indexed lookup, so compatibility zero rows do not depend
-        // on rescanning all DD Permission entries for each grantee/object pair.
-        for (const auto& gr : grantees) {
-            for (const auto& obj : objects) {
-                if (filter && filter->object_name &&
-                    openads::engine::DataDict::ci_name(obj.name) !=
-                        openads::engine::DataDict::ci_name(*filter->object_name))
-                    continue;
-                if (dd->find_permission(gr.name, obj.name,
-                                        std::stoi(obj.code)) != nullptr)
-                    continue;
-                const auto key = top_key(gr.name, obj.name, obj.code);
-                if (!seen_top.insert(key).second) continue;
-                emit_top_row(obj.name, obj.code, obj.type, gr.name, gr.is_group,
-                             0u);
+        // Tables and every column of every table (columns read live from the
+        // physical descriptors, exactly like system.columns).
+        for (const auto& kv : dd->tables()) {
+            add_obj(kv.first, "", 1);
+            auto th = c->open_table(kv.second,
+                                    openads::engine::TableType::Cdx,
+                                    openads::engine::OpenMode::Read);
+            if (th) {
+                openads::engine::Table* tbl = c->lookup_table(th.value());
+                if (tbl) {
+                    std::uint16_t nf = tbl->field_count();
+                    for (std::uint16_t i = 0; i < nf; ++i)
+                        add_obj(tbl->field_descriptor(i).name, kv.first, 4);
+                }
+                c->close_table(th.value());
             }
         }
+        add_obj("TABLE", "", 1);                        // t1 category root
+        for (const auto& kv : dd->views()) add_obj(kv.first, "", 6);
+        add_obj("VIEW", "", 6);                         // t6 category root
+        for (const auto& u : dd->users())
+            if (!is_adssys(u)) add_obj(u, "", 8);
+        add_obj("USER", "", 8);                         // t8 category root
+        for (const auto& g : dd->groups()) add_obj(g, "", 9);
+        add_obj("SERVER:Admin",   "", 9);
+        add_obj("SERVER:Monitor", "", 9);
+        add_obj("USER GROUP", "", 9);                   // t9 category root
+        for (const auto& kv : dd->procs()) add_obj(kv.first, "", 10);
+        add_obj("PROCEDURE", "", 10);                   // t10 category root
+        add_obj("Database", "", 11);                    // t11 singleton
+        for (const auto& kv : dd->links()) add_obj(kv.first, "", 12);
+        add_obj("LINK", "", 12);                        // t12 category root
+        add_obj("PUBLICATION", "", 15);                 // t15 category root
+        add_obj("SUBSCRIPTION", "", 17);                // t17 category root
+        for (const auto& kv : dd->functions()) add_obj(kv.first, "", 18);
+        add_obj("FUNCTION", "", 18);                    // t18 category root
+        add_obj("PACKAGE", "", 19);                     // t19 category root
+
+        // Decode one (grantee, object) pair into the 14 output columns.
+        // Fields inherit their parent table's grant; every other object is
+        // looked up on its own name/type.  Rights OpenADS cannot decode from
+        // SAP's encrypted permission blobs render "0".
+        auto emit_cell = [&](const MtxObj& obj, const MtxGrantee& gr) {
+            uint32_t m = 0;
+            const auto* pe = (obj.type == 4)
+                ? dd->find_permission(gr.name, obj.parent, 1)
+                : dd->find_permission(gr.name, obj.name, obj.type);
+            if (pe) m = pe->bitmask;
+            bool g = gr.is_group;
+            std::string S = "0", U = "0", I = "0", D = "0", E = "0",
+                        Ac = "0", In = "0", Cr = "0", Al = "0", Dr = "0";
+            switch (obj.type) {
+                case 1:   // Table
+                    S = dml_col(m, g, 0); U = dml_col(m, g, 1);
+                    I = dml_col(m, g, 4); D = dml_col(m, g, 5);
+                    break;
+                case 4:   // Field (inherits parent table SELECT/UPDATE/INSERT)
+                    S = dml_col(m, g, 0); U = dml_col(m, g, 1);
+                    I = dml_col(m, g, 4);
+                    break;
+                case 10:  // StoredProc
+                case 18:  // Function
+                    E = exe_col(m, g);
+                    break;
+                case 11:  // Database (all DML + execute meaningful)
+                    S = dml_col(m, g, 0); U = dml_col(m, g, 1);
+                    I = dml_col(m, g, 4); D = dml_col(m, g, 5);
+                    E = exe_col(m, g);
+                    break;
+                default:  // Views / users / groups / links / category roots
+                    break;
+            }
+            rows.push_back({obj.name, std::to_string(obj.type), obj.parent,
+                            gr.name, S, U, I, D, E, Ac, In, Cr, Al, Dr});
+        };
+
+        rows.reserve(grantees.size() * objects.size());
+        for (const auto& gr : grantees)
+            for (const auto& obj : objects)
+                emit_cell(obj, gr);
 
         return build(cols, rows);
     }
@@ -19496,15 +19465,32 @@ build_system_table(Connection* c, std::string sys_name,
         return build(cols, rows);
     }
     if (sys_name == "relations") {
+        // SAP system.relations column set + order (2026-07-26): primary
+        // (parent) table/index, then foreign (child) table/index, then the
+        // numeric update/delete rules. RI_No_PKey_Error / RI_Cascade_Error
+        // are empty (OpenADS does not track them; SAP shows them empty on
+        // pmsys). SAP has no fail-table column.
         const std::vector<Col> cols = {
-            {"RI_NAME",    'C', 200, 0},
-            {"PARENT",     'C', 200, 0},
-            {"CHILD",      'C', 200, 0},
-            {"PARENT_TAG", 'C', 200, 0},
-            {"CHILD_TAG",  'C', 200, 0},
-            {"UPDATE_OPT", 'C',  10, 0},
-            {"DELETE_OPT", 'C',  10, 0},
-            {"FAIL_TABLE", 'C', 200, 0},
+            {"Name",              'C', 200, 0},
+            {"RI_Primary_Table",  'C', 200, 0},
+            {"RI_Primary_Index",  'C', 200, 0},
+            {"RI_Foreign_Table",  'C', 200, 0},
+            {"RI_Foreign_Index",  'C', 200, 0},
+            {"RI_UpdateRule",     'N',  10, 0},
+            {"RI_DeleteRule",     'N',  10, 0},
+            {"RI_No_PKey_Error",  'C',   1, 0},
+            {"RI_Cascade_Error",  'C',   1, 0},
+        };
+        // OpenADS stores the RI rule as a word; SAP exposes the raw
+        // numeric code, which is asymmetric between update and delete
+        // (update Cascade=1, delete Cascade=2; SetNull=3 both). Restrict's
+        // code is a documented default (0) — pmsys has no Restrict RI to
+        // oracle it against.
+        auto ri_rule_code = [](const std::string& w, bool is_del)
+                            -> std::string {
+            if (w == "Cascade") return is_del ? "2" : "1";
+            if (w == "SetNull") return "3";
+            return "0";                       // Restrict / unknown
         };
         std::vector<std::vector<std::string>> rows;
         for (const auto& kv : dd->ri()) {
@@ -19513,9 +19499,10 @@ build_system_table(Connection* c, std::string sys_name,
                 !dd_can_view_object_metadata(c, e.child)) {
                 continue;
             }
-            rows.push_back({e.name, e.parent, e.child,
-                            e.parent_tag, e.child_tag,
-                            e.update_opt, e.delete_opt, e.fail_table});
+            rows.push_back({e.name, e.parent, e.parent_tag,
+                            e.child, e.child_tag,
+                            ri_rule_code(e.update_opt, false),
+                            ri_rule_code(e.delete_opt, true), "", ""});
         }
         return build(cols, rows);
     }
@@ -19556,31 +19543,24 @@ build_system_table(Connection* c, std::string sys_name,
         return build(cols, rows);
     }
     if (sys_name == "triggers") {
-        // TIMING decodes SAP binary timing byte: 1=BEFORE 2=INSTEAD OF 4=AFTER
-        // EVENT_MASK is the SAP event type byte: 1=INSERT 2=UPDATE 3=DELETE
-        auto timing_str = [](std::uint32_t t) -> std::string {
-            if (t == 1) return "BEFORE";
-            if (t == 2) return "INSTEAD OF";
-            if (t == 4) return "AFTER";
-            return "";
-        };
-        auto event_str = [](std::uint32_t ev) -> std::string {
-            if (ev == 1) return "INSERT";
-            if (ev == 2) return "UPDATE";
-            if (ev == 3) return "DELETE";
-            return "";
-        };
+        // SAP system.triggers column set (2026-07-26). Trig_Event_Type:
+        // 1=INSERT 2=UPDATE 3=DELETE. Trig_Trigger_Type (timing): 1=BEFORE
+        // 2=INSTEAD OF 4=AFTER. Trig_Container_Type is 3 for a SQL-script
+        // trigger (SAP constant, oracle-verified). Trig_Function_Name is
+        // empty for script triggers. Triggers_Disabled is the inverse of
+        // OpenADS's `enabled`.
         std::vector<std::vector<std::string>> rows;
         auto add_trigger_row = [&](const auto& e) {
             if (!dd_can_view_object_metadata(c, e.table_alias)) return;
             rows.push_back({e.name, e.table_alias,
                             std::to_string(e.event_mask),
-                            timing_str(e.timing),
-                            event_str(e.event_mask),
-                            e.container, e.procedure,
+                            std::to_string(e.timing),
+                            "3",
+                            e.container, "",
                             std::to_string(e.priority),
-                            e.enabled ? "T" : "F",
-                            std::to_string(e.options)});
+                            std::to_string(e.options),
+                            e.comment,
+                            e.enabled ? "F" : "T"});
         };
         if (filter && filter->table_name) {
             for (const auto* e : dd->triggers_for_table(*filter->table_name))
@@ -19589,71 +19569,80 @@ build_system_table(Connection* c, std::string sys_name,
             for (const auto& kv : dd->triggers())
                 add_trigger_row(kv.second);
         }
-        // RCB 07/16/2026: CONTAINER sized to content (was fixed C(4096) —
-        // enough for pmsys but silently truncates any larger trigger body).
         const std::vector<Col> cols = {
-            {"TRIG_NAME",    'C', 200, 0},
-            {"TABLE_NAME",   'C', 200, 0},
-            {"EVENT_MASK",   'N',  10, 0},
-            {"TIMING",       'C',  15, 0},
-            {"EVENT",        'C',  20, 0},
-            {"CONTAINER",    'C', fit_width(rows, 5, 4096), 0},
-            {"PROC",         'C', 200, 0},
-            {"PRIORITY",     'N',  10, 0},
-            {"ENABLED",      'L',   1, 0},
-            {"TRIG_OPTIONS", 'N',  10, 0},
+            {"Name",                'C', 200, 0},
+            {"Trig_TableName",      'C', 200, 0},
+            {"Trig_Event_Type",     'N',  10, 0},
+            {"Trig_Trigger_Type",   'N',  10, 0},
+            {"Trig_Container_Type", 'N',  10, 0},
+            {"Trig_Container",      'C', fit_width(rows, 5, 4096), 0},
+            {"Trig_Function_Name",  'C', 200, 0},
+            {"Trig_Priority",       'N',  10, 0},
+            {"Trig_Options",        'N',  10, 0},
+            {"Comment",             'C', 200, 0},
+            {"Triggers_Disabled",   'L',   1, 0},
         };
         return build(cols, rows);
     }
     if (sys_name == "storedprocedures") {
+        // SAP system.storedprocedures column set (2026-07-26). OpenADS
+        // has only script procs, so Proc_DLL_* are empty and
+        // Proc_Invoke_Option is 4 (SAP's constant for a script proc,
+        // oracle-verified across all pmsys procs).
         std::vector<std::vector<std::string>> rows;
         for (const auto& kv : dd->procs()) {
             const auto& e = kv.second;
-            rows.push_back({e.name, e.container, e.procedure,
-                            e.input_params, e.output_params});
+            rows.push_back({e.name, e.input_params, e.output_params,
+                            "", "", e.comment, "4", e.procedure});
         }
-        // RCB 07/16/2026: rows built first so the text columns can be sized
-        // to the real content — a fixed C(255) truncated multi-KB SQL bodies.
         const std::vector<Col> cols = {
-            {"PROC_NAME",  'C', 200, 0},
-            {"CONTAINER",  'C', fit_width(rows, 1, 250), 0},
-            {"PROCEDURE",  'C', fit_width(rows, 2, 255), 0},
-            {"INPUT",      'C', fit_width(rows, 3, 250), 0},
-            {"OUTPUT",     'C', fit_width(rows, 4, 250), 0},
+            {"Name",                   'C', 200, 0},
+            {"Proc_Input",             'C', fit_width(rows, 1, 250), 0},
+            {"Proc_Output",            'C', fit_width(rows, 2, 250), 0},
+            {"Proc_DLL_Name",          'C', 128, 0},
+            {"Proc_DLL_Function_Name", 'C', 128, 0},
+            {"Comment",                'C', fit_width(rows, 5, 200), 0},
+            {"Proc_Invoke_Option",     'N',  10, 0},
+            {"SQL_Script",             'C', fit_width(rows, 7, 255), 0},
         };
         return build(cols, rows);
     }
     if (sys_name == "functions") {
+        // SAP system.functions column set (2026-07-26). Package and
+        // User_Defined_Prop are empty (OpenADS does not track them).
         std::vector<std::vector<std::string>> rows;
         for (const auto& kv : dd->functions()) {
             const auto& e = kv.second;
-            rows.push_back({e.name, e.container, e.return_type,
-                            e.input_params, e.implementation, e.comment});
+            rows.push_back({e.name, "", e.return_type, e.input_params,
+                            e.implementation, e.comment, ""});
         }
-        // RCB 07/16/2026: FUNC_BODY sized to content — C(255) truncated real
-        // UDF bodies (pmsys NewSeqKey is 1517 bytes).
         const std::vector<Col> cols = {
-            {"FUNC_NAME",  'C', 200, 0},
-            {"CONTAINER",  'C', fit_width(rows, 1, 250), 0},
-            {"RET_TYPE",   'C',  50, 0},
-            {"IN_PARAMS",  'C', fit_width(rows, 3, 200), 0},
-            {"FUNC_BODY",  'C', fit_width(rows, 4, 255), 0},
-            {"COMMENT",    'C', 200, 0},
+            {"Name",              'C', 200, 0},
+            {"Package",           'C',  64, 0},
+            {"Return Type",       'C',  64, 0},
+            {"Input Parameters",  'C', fit_width(rows, 3, 200), 0},
+            {"Implementation",    'C', fit_width(rows, 4, 255), 0},
+            {"Comment",           'C', 200, 0},
+            {"User_Defined_Prop", 'C',  64, 0},
         };
         return build(cols, rows);
     }
     if (sys_name == "views") {
+        // SAP system.views column set (2026-07-26): Name, View_Stmt_Len
+        // (byte length of the statement), View_Stmt, Comment,
+        // Triggers_Disabled.
         std::vector<std::vector<std::string>> rows;
         for (const auto& kv : dd->views()) {
             const auto& e = kv.second;
-            rows.push_back({e.name, e.sql, e.comment});
+            rows.push_back({e.name, std::to_string(e.sql.size()),
+                            e.sql, e.comment, "F"});
         }
-        // RCB 07/16/2026: VIEW_SQL sized to content (same C(255)-class
-        // truncation as storedprocedures/functions).
         const std::vector<Col> cols = {
-            {"VIEW_NAME", 'C', 200, 0},
-            {"VIEW_SQL",  'C', fit_width(rows, 1, 250), 0},
-            {"COMMENT",   'C', 200, 0},
+            {"Name",              'C', 200, 0},
+            {"View_Stmt_Len",     'N',  10, 0},
+            {"View_Stmt",         'C', fit_width(rows, 2, 250), 0},
+            {"Comment",           'C', 200, 0},
+            {"Triggers_Disabled", 'L',   1, 0},
         };
         return build(cols, rows);
     }
@@ -24825,6 +24814,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!th) return fail(th.error());
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
+        sql_dml_hold_write_lock(tbl);
 
         // Compile the ON tree with the same closure shape the UPDATE
         // branch below uses (helper extraction still deferred).
@@ -25139,6 +25129,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!th) return fail(th.error());
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
+        sql_dml_hold_write_lock(tbl);
         // Pre-resolve assignments so a typo surfaces before any write.
         struct Assn {
             std::uint16_t                   field_index;
@@ -25393,6 +25384,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!th) return fail(th.error());
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
+        sql_dml_hold_write_lock(tbl);
         // Reuse the WHERE filter machinery for SELECT: it's already
         // wired and the predicate semantics match exactly.
         if (del.value().where) {
@@ -25556,6 +25548,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!th) return fail(th.error());
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
+        sql_dml_hold_write_lock(tbl);
 
         // S4 — DD field constraints (oracle-verified): SAP rejects an
         // INSERT that leaves a non-nullable column without a value with
@@ -31076,135 +31069,128 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return s;
     };
 
-    // ADS static-cursor semantics — single-table SELECT with ORDER BY /
-    // DISTINCT / LIMIT must be a STANDALONE temp table, not the live source
-    // with a recno_sequence. Real ACE returns a static cursor (its own temp
-    // table) for these; the ERP then runs `INDEX ON ... ; DBSETORDER(n)` on
-    // the result. If the cursor were the live `<source>.dbf`, those index ops
-    // would hit the production table and REWRITE its official .cdx (the user
-    // saw "cualquier SELECT-SQL reescribio los indices originales"), and a
-    // recno_sequence over the live table makes DBSETORDER a no-op for the
-    // browse. Materialising the result into a clean temp DBF (its own recnos
-    // 1..N, its own index space) isolates it from the source: INDEX ON /
-    // DBSETORDER behave exactly like DBFCDX / ADS_CDX. Same shape the
-    // multi-table / union / aggregate / CASE paths already produce.
-    if (derived_cur == 0 && tbl->has_recno_sequence()) {
-        ADSHANDLE conn_h = 0;
-        s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
-            if (k != HandleKind::Connection) return;
-            if (static_cast<Connection*>(p) == c) conn_h = h;
-        });
-        if (conn_h != 0) {
-            std::vector<std::uint16_t> cols;
-            bool col_err = false;
-            bool col_denied = false;
-            if (parsed.value().projection.empty()) {
-                std::uint16_t nf = tbl->field_count();
-                cols.reserve(nf);
-                for (std::uint16_t k = 0; k < nf; ++k) {
-                    // A column-restricted user must not get the hidden columns
-                    // copied into the temp table either (the projection applied
-                    // to a live cursor below can't reach a materialised one).
-                    if (allowed_cols &&
-                        allowed_cols->find(col_lower(
-                            tbl->field_descriptor(k).name)) ==
-                            allowed_cols->end()) {
+    // Issue #136: single-table ORDER BY / DISTINCT / LIMIT used a live
+    // cursor over the source with a recno_sequence. An application that
+    // ran INDEX ON the result rewrote the production .cdx. Real ACE
+    // returns a static temp cursor; so do the join / CASE paths here.
+    // Materialise now (column ACL applied first so the temp only holds
+    // permitted columns), close the live source, and return a memory
+    // table with recnos 1..N in result order and its own index space.
+    // Memory tables leave no files in the customer's data directory.
+    const bool need_static =
+        derived_cur == 0 &&
+        tbl->has_recno_sequence() &&
+        (parsed.value().order_by || parsed.value().distinct ||
+         parsed.value().limit >= 0 || parsed.value().offset > 0);
+    if (need_static) {
+        std::vector<std::uint16_t> cols;
+        if (!parsed.value().projection.empty()) {
+            cols.reserve(parsed.value().projection.size());
+            for (const auto& col : parsed.value().projection) {
+                std::int32_t fidx = tbl->field_index(col);
+                if (fidx < 0) {
+                    if (table_handle != 0) c->close_table(table_handle);
+                    return fail(openads::AE_COLUMN_NOT_FOUND, col.c_str());
+                }
+                if (allowed_cols &&
+                    allowed_cols->find(col_lower(col)) ==
+                        allowed_cols->end()) {
+                    if (table_handle != 0) c->close_table(table_handle);
+                    return fail(openads::AE_ACCESS_DENIED,
+                                ("no column permission: " + col).c_str());
+                }
+                cols.push_back(static_cast<std::uint16_t>(fidx));
+            }
+        } else {
+            const std::uint16_t nf =
+                static_cast<std::uint16_t>(tbl->field_count());
+            for (std::uint16_t i = 0; i < nf; ++i) {
+                if (allowed_cols) {
+                    const std::string& fname =
+                        tbl->field_descriptor(i).name;
+                    if (allowed_cols->find(col_lower(fname)) ==
+                        allowed_cols->end())
                         continue;
-                    }
-                    cols.push_back(k);
                 }
-            } else {
-                cols.reserve(parsed.value().projection.size());
-                for (const auto& cn : parsed.value().projection) {
-                    std::int32_t fi = tbl->field_index(cn);
-                    if (fi < 0) { col_err = true; break; }
-                    if (allowed_cols &&
-                        allowed_cols->find(col_lower(cn)) ==
-                            allowed_cols->end()) {
-                        col_denied = true; break;
-                    }
-                    cols.push_back(static_cast<std::uint16_t>(fi));
-                }
+                cols.push_back(i);
             }
-            if (col_err) return fail(openads::AE_COLUMN_NOT_FOUND, "");
-            if (col_denied) return fail(openads::AE_ACCESS_DENIED,
-                                        "no column permission");
-            auto type_name = [](char raw) -> const char* {
-                switch (raw) {
-                    case 'C': return "Character";  case 'N': return "Numeric";
-                    case 'D': return "Date";       case 'L': return "Logical";
-                    case 'M': return "Memo";       case 'F': return "Float";
-                    case 'I': return "Integer";    case 'Y': return "Currency";
-                    case 'B': return "Double";     case 'V': return "Varchar";
-                    case 'Q': return "Varbinary";
-                }
-                return "Character";
-            };
-            std::string defs;
-            for (auto cidx : cols) {
-                const auto& fd = tbl->field_descriptor(cidx);
-                if (!defs.empty()) defs.push_back(';');
-                defs += fd.name;
-                defs.push_back(',');
-                defs += type_name(static_cast<char>(fd.raw_type));
-                if (fd.length   > 0) { defs.push_back(','); defs += std::to_string(fd.length); }
-                if (fd.decimals > 0) { defs.push_back(','); defs += std::to_string(fd.decimals); }
-            }
-            char nb[64];
-            std::snprintf(nb, sizeof(nb), "_srt_%llx",
-                          static_cast<unsigned long long>(
-                              openads::platform::monotonic_nanos()));
-            std::string tmp_name = nb;
-            std::vector<UNSIGNED8> name_buf(tmp_name.size() + 1, 0);
-            std::memcpy(name_buf.data(), tmp_name.data(), tmp_name.size());
-            std::vector<UNSIGNED8> def_buf(defs.size() + 1, 0);
-            std::memcpy(def_buf.data(), defs.data(), defs.size());
-            ADSHANDLE hNew = 0;
-            UNSIGNED32 crc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
-                                            ADS_CDX, 0, 0, 0, 0,
-                                            def_buf.data(), &hNew);
-            if (crc == openads::AE_SUCCESS) {
-                openads::engine::Table* tgt =
-                    s.registry.lookup<openads::engine::Table>(
-                        hNew, HandleKind::Table);
-                if (tgt != nullptr) {
-                    std::vector<std::uint32_t> seq = tbl->recno_sequence();
-                    for (std::uint32_t r : seq) {
-                        if (auto g = tbl->goto_record(r); !g) continue;
-                        if (auto ar = tgt->append_record(); !ar) break;
-                        for (std::size_t i = 0; i < cols.size(); ++i) {
-                            auto v = tbl->read_field(cols[i]);
-                            std::string sv =
-                                v ? v.value().as_string : std::string();
-                            (void)tgt->set_field(
-                                static_cast<std::uint16_t>(i), sv);
-                        }
-                    }
-                    (void)tgt->flush();
-                }
-                AdsCloseTable(hNew);
-                // Drop the live source cursor so the ERP's INDEX ON / close
-                // never touches the production table or its official .cdx.
-                if (table_handle != 0) c->close_table(table_handle);
-                auto cth = c->open_table(tmp_name,
-                                         openads::engine::TableType::Cdx,
-                                         openads::engine::OpenMode::Shared);
-                if (!cth) return fail(cth.error());
-                openads::engine::Table* ctbl = c->lookup_table(cth.value());
-                if (!ctbl) return fail(openads::AE_INTERNAL_ERROR,
-                                       "sorted temp post-open");
-                ADSHANDLE gh_srt =
-                    s.registry.register_object(HandleKind::Table, ctbl);
-                // Tie the temp table's lifetime to the cursor handle: without
-                // this, every SELECT ... ORDER BY leaves a _srt_*.dbf (and any
-                // index the caller built on it) behind in the data directory.
-                materialised_cursor_temps()[gh_srt] =
-                    (std::filesystem::path(c->data_dir()) / tmp_name).string();
-                *phCursor = gh_srt;
-                return ok();
-            }
-            // AdsCreateTable failed -> fall through to the live-cursor return.
         }
+        if (cols.empty()) {
+            if (table_handle != 0) c->close_table(table_handle);
+            return fail(openads::AE_ACCESS_DENIED,
+                        "no columns permitted for SELECT");
+        }
+
+        // SpCol::colname is const char* — keep owning strings alive until
+        // build_memory_result has copied the names into DbfField.
+        std::vector<std::string> name_storage;
+        name_storage.reserve(cols.size());
+        std::vector<SpCol> spcols;
+        spcols.reserve(cols.size());
+        for (auto fi : cols) {
+            const auto& fd = tbl->field_descriptor(fi);
+            name_storage.push_back(fd.name);
+            SpCol sc;
+            sc.colname = name_storage.back().c_str();
+            using FT = openads::drivers::DbfFieldType;
+            if (fd.type == FT::Numeric || fd.type == FT::Float ||
+                fd.type == FT::Integer || fd.type == FT::Double ||
+                fd.type == FT::Currency || fd.type == FT::ShortInt ||
+                fd.type == FT::AutoInc) {
+                sc.type = 'N';
+                sc.length = 20;
+                sc.decimals = static_cast<std::uint8_t>(fd.decimals);
+            } else if (fd.type == FT::Logical) {
+                sc.type = 'L';
+                sc.length = 1;
+                sc.decimals = 0;
+            } else {
+                sc.type = 'C';
+                sc.length = static_cast<std::uint8_t>(
+                    fd.length > 0 && fd.length <= 254 ? fd.length : 50);
+                sc.decimals = 0;
+            }
+            spcols.push_back(sc);
+        }
+
+        std::vector<std::vector<std::string>> mrows;
+        const auto& seq = tbl->recno_sequence();
+        mrows.reserve(seq.size());
+        for (std::uint32_t r : seq) {
+            if (auto g = tbl->goto_record(r); !g) continue;
+            std::vector<std::string> row;
+            row.reserve(cols.size());
+            for (auto fi : cols) {
+                auto v = tbl->read_field(fi);
+                std::string cell = v ? v.value().as_string : std::string();
+                while (!cell.empty() && cell.back() == ' ') cell.pop_back();
+                row.push_back(std::move(cell));
+            }
+            mrows.push_back(std::move(row));
+        }
+
+        auto mt = build_memory_result("sql_orderby", spcols, mrows);
+        if (!mt) {
+            if (table_handle != 0) c->close_table(table_handle);
+            return fail(mt.error());
+        }
+        auto ath = c->adopt_table(std::move(mt).value(),
+                                  "_sql_orderby_cursor");
+        if (!ath) {
+            if (table_handle != 0) c->close_table(table_handle);
+            return fail(ath.error());
+        }
+        openads::engine::Table* ctbl = c->lookup_table(ath.value());
+        if (!ctbl) {
+            if (table_handle != 0) c->close_table(table_handle);
+            return fail(openads::AE_INTERNAL_ERROR,
+                        "ORDER BY materialize post-adopt");
+        }
+        if (table_handle != 0) c->close_table(table_handle);
+        ADSHANDLE gh_static =
+            s.registry.register_object(HandleKind::Table, ctbl);
+        *phCursor = gh_static;
+        return ok();
     }
 
     // M10.46 — when this query was a derived-table outer SELECT,
@@ -32129,6 +32115,23 @@ UNSIGNED32 ENTRYPOINT AdsGetRelKeyPos(ADSHANDLE h, double* p) {
                  static_cast<double>(walk.size() - 1);
             return ok();
         }
+        // Non-CDX: O(1) via the cached ordered-recno walk (built once,
+        // reused across paints). Mirrors the CDX fast path above.
+        if (auto* ntx =
+                dynamic_cast<openads::drivers::ntx::NtxIndex*>(idx)) {
+            const auto& walk = ntx->ordered_recnos_cached();
+            if (walk.size() <= 1) { *p = 0.0; return ok(); }
+            std::uint32_t pos = ntx->pos_of_recno_cached(rn);
+            if (pos == 0xFFFFFFFFu) {
+                if (rn > rc) rn = rc;
+                *p = static_cast<double>(rn - 1) /
+                     static_cast<double>(rc - 1);
+                return ok();
+            }
+            *p = static_cast<double>(pos) /
+                 static_cast<double>(walk.size() - 1);
+            return ok();
+        }
         // Native ADI tag: same O(1) cache as CDX above. Without this branch
         // an ADT company paid a full index walk on EVERY browse paint —
         // FiveWin binds bKeyNo to AdsGetRelKeyPos for the ADS RDD
@@ -32151,7 +32154,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRelKeyPos(ADSHANDLE h, double* p) {
                  static_cast<double>(walk.size() - 1);
             return ok();
         }
-        // Non-CDX (NTX): legacy per-call O(n) walk.
+        // Unknown index type: legacy per-call O(n) walk.
         idx->invalidate_cursor();
         auto first = idx->seek_first();
         if (!first) return fail(first.error());
@@ -33576,9 +33579,6 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
     if (ord != nullptr && ord->index() != nullptr) {
         if (auto* cdx =
                 dynamic_cast<openads::drivers::cdx::CdxIndex*>(ord->index())) {
-            // When scope is active, count only keys within [top, bottom]
-            // instead of the entire conditional index. With SET DELETED ON
-            // exclude deleted rows so xBrowse OrdKeyCount matches Skip.
             auto& sc = ord->scope();
             const bool hide_del = !t->show_deleted_records();
             const std::uint32_t saved_rn = t->recno();
@@ -33607,6 +33607,13 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
                     cdx->ordered_recnos_cached().size());
             }
             if (hide_del && saved_rn != 0) (void)t->goto_record(saved_rn);
+            return ok();
+        }
+        // NTX: use cached B-tree walk for correct conditional count
+        if (auto* ntx =
+                dynamic_cast<openads::drivers::ntx::NtxIndex*>(ord->index())) {
+            *pulCount = static_cast<UNSIGNED32>(
+                ntx->ordered_recnos_cached().size());
             return ok();
         }
         if (auto* adi =

@@ -1,0 +1,88 @@
+# OpenADS ↔ SAP Parity — Open Items & Verification Backlog
+
+Living checklist of SAP-parity gaps. The S4 gate (`tools/qa-diff/s4_parity.ps1`)
+is **42/42** on pmsys as of 2026-07-26. This file tracks what's left and what
+still needs verification against current code.
+
+## ⚠️ Blocked on the user
+- [ ] **Find other UNENCRYPTED SAP dictionaries for data-level testing.**
+      This is on Reinaldo. mp10 (`e:\AdsData\sfi\mp.add`) is sealed by SAP's
+      proprietary table encryption — OpenADS can't read the row data
+      (COUNT works off the header; field names/data come back as ciphertext),
+      so it cannot serve as a data-level second corpus. The S4 gate is
+      pmsys-only until an unencrypted DD with real data is available. A second
+      corpus is the single biggest thing that would harden the "1:1" claim
+      against SQL shapes pmsys never exercises.
+
+## A. S4 polish (cosmetic — tracked as tasks #1–3)
+- [ ] **#1 Date display format** — `AdsGetString` on date cols returns raw
+      `YYYYMMDD`; SAP formats per connection date format (default `MM/DD/YYYY`).
+      Highest-value but riskiest (touches every string-read path). FIRST do a
+      DA-Web/OpenERP impact check — do those apps depend on raw `YYYYMMDD`?
+      Ref: memory `project_oa_date_string_gap.md`.
+- [ ] **#2 `_spout_` >10-char output column names** — proc `__output` temp is a
+      DBF free table, so `databasepath` → `databasepa`. Fix: make `__output`
+      an ADT-typed temp (long field names). Low risk.
+- [ ] **#3 EXPR_n numbering, mixed aliased/unaliased aggregates** — verify
+      `SELECT COUNT(*), SUM(x) AS s, MIN(y)` column naming matches SAP.
+
+## B. VERIFIED OPEN 2026-07-26 (was "needs verification")
+- [ ] **Catalog column-name + column-SET divergence** — CONFIRMED across all
+      five DD catalogs on pmsys. OA invents its own names AND omits/renames
+      columns; a SAP-compatible client filtering by SAP column names breaks
+      (proved: `WHERE Object_Type = ...` on OA → "Column not found:
+      Object_Type" because OA's column is `OBJ_TYPE`). Task #4.
+      | catalog | OA columns | SAP columns |
+      |---|---|---|
+      | storedprocedures | PROC_NAME,CONTAINER,PROCEDURE,INPUT,OUTPUT | Name,Proc_Input,Proc_Output,Proc_DLL_Name,Proc_DLL_Function_Name,Comment,Proc_Invoke_Option,SQL_Script |
+      | functions | FUNC_NAME,CONTAINER,RET_TYPE,IN_PARAMS,FUNC_BODY,COMMENT | Name,Package,Return Type,Input Parameters,Implementation,Comment,User_Defined_Prop |
+      | triggers | TRIG_NAME,TABLE_NAME,EVENT_MASK,TIMING,EVENT,CONTAINER,PROC,PRIORITY,ENABLED,TRIG_OPTIONS | Name,Trig_TableName,Trig_Event_Type,Trig_Trigger_Type,Trig_Container_Type,Trig_Container,Trig_Function_Name,Trig_Priority,Trig_Options,Comment,Trigger |
+      | relations | RI_NAME,PARENT,CHILD,PARENT_TAG,CHILD_TAG,UPDATE_OPT,DELETE_OPT,FAIL_TABLE | Name,RI_Primary_Table,RI_Primary_Index,RI_Foreign_Table,RI_Foreign_Index,RI_UpdateRule,RI_DeleteRule,RI_No_PKey_Error,RI_Cascade_Error |
+      | permissions | OBJ_NAME,OBJ_TYPE,PARENT,GRANTEE,SELECT..DROP | Name,Object_Type,Parent,Grantee,Select..Drop |
+      NOTE: `system.indexes` was already fixed to SAP names — same fix pattern.
+- [x] **`system.permissions` row-matrix parity** — DONE 2026-07-28. Rewrote the
+      builder in `ace_exports.cpp` to emit SAP's full uniform grantee×object
+      cross product. pmsys now **7912 rows = 23 grantees × 344 objects**, exactly
+      matching SAP; per-type breakdown identical (t1=33, t4=262, t6=1, t8=9,
+      t9=16, t10=8, t11=1, t12=1, t15=1, t17=1, t18=10, t19=1). The 344 objects =
+      all tables + every column (read live from physical descriptors, like
+      system.columns) + users/groups/procs/functions + per-category root
+      singletons (`TABLE`/`VIEW`/`USER`/`USER GROUP`/`PROCEDURE`/`LINK`/
+      `PUBLICATION`/`SUBSCRIPTION`/`PACKAGE`/`Database`); grantees = real users +
+      groups + server pseudo-groups `SERVER:Admin`/`SERVER:Monitor`, adssys
+      omitted. Cells always render `0`/`1`/`2`, never blank (matches SAP). VALUES
+      verified byte-identical for the common cases — e.g. `General/landlords`
+      returns S=U=I=D=1, rest 0, exactly as SAP; procs return Execute=1. The
+      encrypted-blob ceiling only affects user-direct grants (render 0). All 10
+      permissions unit tests pass; S4 gate 40/42 (2 fails = #138 lock regression).
+      FOLLOW-UP (minor, import-casing): OA surfaces two grantees lowercased —
+      `autotasks`/`rcb` where SAP has `AutoTasks`/`RCB`. Same entities, cosmetic;
+      the importer lowercases these user names. Not a row-matrix issue.
+- [ ] **Views inside joins** — single-table view resolution was prototyped
+      (then reverted with the mp10 work); a view used *within* a join is not
+      resolved. Verify + decide scope. Not yet tasked.
+
+## C. Larger open work (not SQL-parity blocking)
+- [ ] **ACE64 export surface** — 393/578 SAP exports present, 231 missing
+      (memory 22 days old, `project_ace64_compat.md`). Binary-ABI clients only.
+      Report: `ACE64_API_COMPAT_REPORT.local.md`.
+- [ ] **VFP table support** (DBF 0x30/0x31) — `table.cpp` errors on VFP-typed
+      DBF; needs `_NullFlags` bitmap + VFP autoinc. Deferred from M4.
+- [ ] **Forward-only prefetch (M12.21)** — disabled after cursor-drift
+      regressions on indexed scans; re-enable once drift root cause understood.
+
+## D. Out of scope / indefinitely deferred
+- ADS proprietary ADT **table encryption** (format not reversed) and
+  `AdsDecryptTable`/`EncryptRecord`/`DecryptRecord` — stub
+  `AE_FUNCTION_NOT_AVAILABLE`. The per-object encrypted permission blobs are
+  the same problem (worked around at import via the ACE cross-check).
+
+## Done this session (do NOT reopen — older memory still lists these as gaps)
+UPDATE `SET col = expr` RHS · `EXECUTE IMMEDIATE` · `DECLARE CURSOR AS EXECUTE
+PROCEDURE` · trigger error propagation · nested UDF calls · bracketed column
+identifiers · proc/UDF body truncation · `sp_GetPhysicalPath` · joins
+(2-table + N-way, ADT + DBF, aggregates, CICHAR, DISTINCT/TOP/LIMIT) ·
+GROUP BY key projection · SAP AVG semantics · AQE 7200 error envelope ·
+EXECUTE PROCEDURE 2124 arg-binding type check · CICHAR index seeks ·
+2137 ambiguous-column strictness. The 9-day `project_pmsys_exec_scope.md`
+memory is largely superseded.

@@ -6,11 +6,105 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 -> v1.8.30)
+# What's New (v1.0.0-rc29 -> v1.8.33)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
 the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## v1.8.33 Highlights
+
+### Fixed: Legacy `AdsCreateIndex` path resolution
+
+The legacy `AdsCreateIndex` wrapper (used by Harbour's `INDEX ON ... TO`)
+did not resolve index paths the same way as `AdsCreateIndex61`:
+
+- Empty bag name → did not create structural CDX
+- Relative paths → not resolved against table directory
+- Missing extension → fell through to NTX creation
+
+This caused Harbour's `INDEX ON field TO filename` to fail. The fix
+mirrors `AdsCreateIndex61`'s path resolution logic.
+
+### Create-Index Path Tests
+
+8 new test cases covering various index path forms: no extension,
+with extension, absolute paths, empty bag, subdirectory, backslash,
+legacy wrapper, and create+reopen round-trip.
+
+---
+
+## v1.8.32 Highlights
+
+### Comprehensive Lock Test Coverage
+
+New test suite with **23 test cases** covering previously untested lock API
+surfaces. Key findings documented:
+
+| API | Behavior |
+|-----|----------|
+| `AdsGetNumLocks` | Counts **record locks only** — table locks not included |
+| `AdsTestRecLocks` | No-op diagnostic — always returns 0 regardless of state |
+| `AdsIsTableLocked` | Reflects `AdsLockTable` only — exclusive open not reported |
+| Re-entrant lock | 2x `AdsLockRecord` on same recno requires 2x `AdsUnlockRecord` |
+
+### Remote Lock Contention Tests (Pritpal Bedi scenarios)
+
+6 new tests reproducing multi-instance lock scenarios over TCP:
+- Record lock contention fails cleanly (does not hang)
+- Write without lock returns error 5035 (GoHot guard)
+- FLock contention resolves within retry window
+- FLock allows writes without per-record lock
+- Exclusive open allows writes (remote mode)
+- Append auto-lock works over wire
+
+---
+
+## v1.8.31 Highlights
+
+### Write-Guard (GoHot) Enforcement
+
+Implements Harbour's `hb_dbfGoHot()` equivalent at the engine level.
+In **Shared** mode, callers must hold either a Record Lock (`AdsLockRecord`)
+or File Lock (`AdsLockTable`) before mutating a record. This prevents
+silent data corruption when multiple connections share a table.
+
+- **Engine guard** in `writeback_record_()`: checks lock state before every
+  write. Returns error 5035 (`AE_LOCK_FAILED`) if no lock is held.
+- **Pending-append exemption**: freshly-appended records (via `AdsAppendRecord`)
+  are writable without explicit LockRecord — standard xBase/ACE semantics.
+- **Exclusive mode bypass**: opens in `ADS_EXCLUSIVE` mode grant unrestricted
+  access without locks.
+
+### Wire Protocol — OpenTable Mode Pass-Through
+
+The client now sends the requested open mode (Shared/Exclusive/Read) to the
+server in the `OpenTable` payload, using a new capability bit
+(`kCapOpenTableMode = 0x00000008`). Old servers ignore the prefix; new
+servers read it and open in the correct mode.
+
+This fixes remote `ADS_EXCLUSIVE` opens which previously were always opened
+as `ADS_SHARED` on the server.
+
+### Server-Side Table Identity Fix
+
+`LockRecord`/`UnlockRecord`/`LockTable`/`UnlockTable` now route directly to
+the engine table from `tbls_[id]` instead of through the ABI handle. This
+fixes a critical bug where `ensure_abi_handle()` opened a second Table
+instance, causing locks registered on one Table to be invisible to writes
+on the other.
+
+### RI Cascade/SETNULL Locking
+
+Referential Integrity enforcement now locks child tables before
+cascade/SETNULL writes, so the GoHot gate permits the internal mutations.
+
+### Other Fixes
+
+- `AdsOpenIndex` resolves index paths against the connection data directory
+  (not just the table dir) for subdirectory-qualified paths.
 
 ---
 

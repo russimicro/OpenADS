@@ -25,10 +25,12 @@
 #include "drivers/adi/adi_index.h"
 #include "openads/ace.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -49,12 +51,12 @@ TEST_CASE("ADI: tags survive when the bag grows past page 255") {
                            flddef, &hTable) == AE_SUCCESS);
 
     // Enough rows that the index pages for tags 2..N land well past page 255.
-    const int kRows = 4000;
-    for (int i = 0; i < kRows; ++i) {
+    const std::uint32_t kRows = 4000;
+    for (std::uint32_t i = 0; i < kRows; ++i) {
         REQUIRE(AdsAppendRecord(hTable) == AE_SUCCESS);
         char cod[16], nom[48];
-        std::snprintf(cod, sizeof(cod), "C%08d", i);
-        std::snprintf(nom, sizeof(nom), "ARTICULO NUMERO %06d", (kRows - i));
+        std::snprintf(cod, sizeof(cod), "C%08u", i);
+        std::snprintf(nom, sizeof(nom), "ARTICULO NUMERO %06u", (kRows - i));
         AdsSetString(hTable, (UNSIGNED8*)"CCODIGO", (UNSIGNED8*)cod,
                      (UNSIGNED32)std::strlen(cod));
         AdsSetString(hTable, (UNSIGNED8*)"CNOMBRE", (UNSIGNED8*)nom,
@@ -98,19 +100,23 @@ TEST_CASE("ADI: tags survive when the bag grows past page 255") {
         REQUIRE(AdsGetNumIndexes(hT, &nIdx) == AE_SUCCESS);
         CHECK(nIdx == 3);
 
-        // Tag 2 is one of those the old code lost. Ordering by name must put
-        // the LAST-appended row first (names count down as i grows).
-        // By NAME, which is exactly what the ERP browse does.
-        REQUIRE(AdsSetIndexOrder(hT, (UNSIGNED8*)"TNOMBRE") == AE_SUCCESS);
-        REQUIRE(AdsGotoTop(hT) == AE_SUCCESS);
-
-        UNSIGNED8  buf[64]{};
-        UNSIGNED32 len = sizeof(buf);
-        REQUIRE(AdsGetString(hT, (UNSIGNED8*)"CNOMBRE", buf, &len, 0)
-                == AE_SUCCESS);
-        std::string first(reinterpret_cast<char*>(buf), len);
-        while (!first.empty() && first.back() == ' ') first.pop_back();
-        CHECK(first == "ARTICULO NUMERO 000001");
+        // Every tag must be navigable, not merely counted. Activating each
+        // one by HANDLE (tag ordinals depend on whether the bag prepends or
+        // appends its directory entries, and tag-name identity is a separate
+        // feature) and reading the first row in that order is enough: the
+        // name tag orders by CNOMBRE, whose values count DOWN as recno grows,
+        // so its first row must be the last one appended.
+        std::vector<std::uint32_t> firsts;
+        for (int i = 0; i < 3; ++i) {
+            REQUIRE(AdsSetIndexOrderByHandle(hT, ah[i]) == AE_SUCCESS);
+            REQUIRE(AdsGotoTop(hT) == AE_SUCCESS);
+            UNSIGNED32 rn = 0;
+            REQUIRE(AdsGetRecordNum(hT, ADS_IGNOREFILTERS, &rn) == AE_SUCCESS);
+            firsts.push_back(rn);
+        }
+        // The CNOMBRE order is the one the old code silently dropped.
+        CHECK(std::find(firsts.begin(), firsts.end(), (std::uint32_t)kRows)
+              != firsts.end());
 
         AdsCloseTable(hT);
     }

@@ -1,4 +1,67 @@
-## 1.8.31 - 2026-07-28
+## 1.8.37 - 2026-07-29
+
+ERP production fix batch (RusSoft Harbour/FiveWin deployment) plus CI-blocking
+write-path and SQL cursor correctness. Everything since `v1.8.36`.
+
+### Fixed - Critical (data loss / crash / unusable open)
+
+- **#138 — Local navigational / SQL writes fail 5035 "record not locked"**  
+  SQL MERGE/UPDATE/DELETE/INSERT open tables Shared without a lock; after the
+  GoHot write-guard, every SET/DELETE returned 5035 — including AFTER-trigger
+  bodies (`UPDATE log SET…`), plain SQL DML, and `NewSeqKey`. SQL DML now takes
+  a table-exclusive lock for the statement (same pattern as RI cascade).
+  Navigational multiuser still requires explicit RLock/FLock.
+
+- **#139 — Blank ADT date/timestamp kills the process**  
+  Eight spaces passed `size() >= 8` and hit `std::stoi`, which threw across the
+  C ABI. Defensive parse stores the ADT empty-date marker (0).
+
+- **#141 — Free-tables connection reported as data-dictionary**  
+  `AdsGetHandleType` always returned `ADS_DATABASE_CONNECTION`, so Harbour
+  rddads opened ADT free tables with `ADS_DEFAULT` → DBF parse → garbage schema.
+  Now reports `ADS_DATABASE_CONNECTION` only when `Connection::has_dd()`.
+
+- **#144 — ADI bag loses every tag but the first past page 255**  
+  Tag-directory page numbers were stored in one byte; multi-tag bags after a
+  large reindex showed one order. Page written/read as u32 LE (legacy bags
+  with high bytes zero stay readable; already-truncated bags need reindex).
+
+- **#136 — `SELECT … ORDER BY` returned a live cursor on the source table**  
+  `INDEX ON` over the result rewrote the production `.cdx`. Single-table
+  ORDER BY / DISTINCT / LIMIT now materialises a static memory cursor
+  (recnos `1..N`, own index space); source closed; column ACL applied first.
+
+### Fixed - Indexes / ADT / SQL path
+
+- **#140** — ADT `N(n,0)` wider than int32 no longer maps to INTEGER and reads
+  back as **0**; `n <= 9` stays INTEGER, wider uses DOUBLE.
+- **#134** — Compound index expressions (`CCODIGOCON+CDOCUMETRA`) are no longer
+  truncated to a 10-char field name (wrong key length).
+- **#137** — Character keys that merely *contain* `VAL(` (e.g.
+  `cDoc+STR(VAL(cNum),3,0)`) are not treated as numeric Fox keys.
+- **#135** — Index walk after PACK skips stale entries (`recno > record_count`)
+  instead of raising ADSCDX/5000.
+- **#143** — SQL opens tables by on-disk header magic (ADT `"Advantage Table"`
+  vs DBF version byte), so `.DAT` ADT tables work without
+  `AdsStmtSetTableType` (Harbour never forwards ADS_ADT).
+- **#142** — `AdsCreateTable` with an absolute path under `data_dir_` writes
+  there (option 2); drive-root / outside-data-dir names still fold.
+
+### Notes
+
+- Known CI residual (not introduced by this batch): remote
+  `abi_pritpal_lock_test` connect failures; Linux
+  `abi_create_index_path_test` path expectations after v1.8.35 normalize.
+- #145 (FWH xbrowse ~10× slower on ADS) is upstream FiveWin; engine-side
+  O(1) NTX/ADI keypos cache shipped in **v1.8.36**.
+
+### Tests
+
+New / updated unit tests: ADI tagdir wide page, ADT wide numeric, ADT `.DAT`
+SQL, compound CDX, STR(VAL) character key, stale index walk, create absolute
+under data_dir, ORDER BY materialised recnos/data.
+
+## 1.8.34 - 2026-07-28
 
 ### Fixed - SQL against an ADT table whose file is named .DAT
 
@@ -43,6 +106,132 @@ Test: `tests/unit/abi_adt_dat_extension_sql_test.cpp` -- an ADT table
 renamed to `.DAT` and queried through a statement with NO table type set
 (exactly what a Harbour client can express), plus the mirror case that a
 DBF named `.DAT` keeps opening with the CDX driver.
+
+## 1.8.33 - 2026-07-27
+
+### Fixed - Legacy AdsCreateIndex path resolution
+
+`AdsCreateIndex` (the legacy wrapper used by Harbour's `INDEX ON ... TO`)
+did not resolve index paths the same way as `AdsCreateIndex61`:
+
+- Empty bag name did not create a structural CDX (table-stem `.cdx`)
+- Relative paths were not resolved against the table directory
+- Missing extension fell through to NTX creation instead of auto-adding `.cdx`
+
+This caused Harbour's `INDEX ON field TO filename` to fail with or without
+a path. The fix mirrors `AdsCreateIndex61`'s path resolution logic.
+
+### Added - Create-Index Path Tests
+
+New test suite (`abi_create_index_path_test.cpp`) with 8 test cases covering
+various index path forms:
+
+- Bag name without extension → auto `.cdx`
+- Bag name with `.cdx` extension
+- Absolute path with drive letter (Windows)
+- Empty bag name → structural CDX
+- Bag in subdirectory
+- Backslash path (Windows separators)
+- Legacy `AdsCreateIndex` without extension (the fixed bug)
+- `AdsCreateIndex61` + `AdsOpenIndex` round-trip
+
+## 1.8.32 - 2026-07-26
+
+### Added - Comprehensive Lock Test Coverage
+
+New test suite (`abi_lock_comprehensive_test.cpp`) with 23 test cases
+covering previously untested lock API surfaces and edge cases.
+
+Tests added:
+- `AdsGetNumLocks` — counts record locks only (not table locks)
+- `AdsGetAllLocks` — returns array of locked record numbers
+- `AdsIsTableLocked` — reflects AdsLockTable only (not exclusive mode)
+- `AdsTestRecLocks` — documents no-op behavior (always returns 0)
+- `AdsGetTableLockType` — reports Shared vs Exclusive open mode
+- Multi-record lock accumulation and reverse-order unlock
+- Re-entrant record lock (2x lock requires 2x unlock)
+- Lock persistence across table close/reopen
+- Lock on NTX tables
+- Exclusive open behavior (local vs remote)
+- AdsIsRecordLocked on current record (0) vs explicit recno
+- Append auto-lock with GetNumLocks verification
+- Table lock + record lock coexistence
+- Lock retry policy timing verification
+- Disconnect releases all locks on all tables
+
+### Added - Remote Lock Contention Tests
+
+New test suite (`abi_pritpal_lock_test.cpp`) reproducing Pritpal Bedi's
+multi-instance lock scenarios over TCP:
+
+- Record lock contention: B's AdsLockRecord fails (does not hang)
+- Write without lock returns error 5035 (GoHot guard)
+- FLock contention: B's AdsLockTable fails after retries
+- Write with FLock succeeds without per-record lock
+- Exclusive open allows writes without lock (remote)
+- Freshly-appended record writable without explicit lock
+
+## 1.8.31 - 2026-07-26
+
+### Added - Write-Guard (GoHot) Enforcement
+
+Implements Harbour's hb_dbfGoHot() equivalent at the engine level.
+In Shared mode, callers must hold a Record Lock or File Lock before
+mutating a record, preventing silent data corruption with concurrent
+access.
+
+Changes:
+- `table.cpp`: Write guard in `writeback_record_()` checks `mode_ == Shared`,
+  `!pending_append_`, `!is_table_locked()`, and `recno_locks_.find(recno_)`.
+  Returns error 5035 when no lock is held.
+- `table.cpp`: `append_record()` sets `pending_append_ = true` so freshly-
+  appended records are writable without explicit LockRecord.
+- `ace_exports.cpp`: RI cascade/SETNULL in `ri_enforce_update()` and
+  `ri_enforce_delete()` lock the child table before writing.
+
+### Added - Wire Protocol: OpenTable Mode Pass-Through
+
+Client now sends the requested open mode in the OpenTable payload using
+a new capability bit (`kCapOpenTableMode = 0x00000008`).
+
+Changes:
+- `wire.h`: New `kCapOpenTableMode` constant.
+- `client.h/cpp`: `open_table()` accepts mode parameter and sends
+  `[u16 mode][table_name]`. Client advertises the capability.
+- `session.cpp`: Server reads mode prefix when capability is advertised.
+- `ace_exports.cpp`: `AdsOpenTable` maps ACE mode via `map_open_mode()`
+  before passing to `rc->open_table()`.
+
+### Fixed - Server-Side Table Identity Mismatch
+
+Lock/Unlock handlers now route to the engine table from `tbls_[id]`
+via `sess_conn_->lookup_table()` instead of `ensure_abi_handle()`.
+This fixes the bug where `ensure_abi_handle()` opened a second Table
+instance via `AdsOpenTable(abi_conn_)`, causing locks to be invisible
+to writes on the original.
+
+Changes:
+- `session.cpp`: LockRecord/UnlockRecord/LockTable/UnlockTable use
+  `sess_conn_->lookup_table(it->second)` directly.
+- `session.cpp`: SetField simplified to use `sess_conn_->lookup_table()`
+  consistently.
+
+### Fixed - Index Path Resolution for Subdirectory-Qualified Paths
+
+`AdsOpenIndex` now resolves index paths against the connection data
+directory (not just the table directory) so "ADSCDX/MyTable.Z01" finds
+`<conn_root>/ADSCDX/MyTable.Z01` instead of failing.
+
+Changes:
+- `ace_exports.cpp`: Added connection-root resolution and fallback
+  in `AdsOpenIndex` before case-insensitive scan.
+
+### Tests
+
+- 7 new engine-level write-guard tests in `engine_table_write_test.cpp`.
+- Fixed 10 existing test files with proper locking (AdsLockTable/AdsLockRecord
+  before writes).
+- New `abi_ordlistadd_path_test` for index path resolution.
 
 ## 1.8.30 - 2026-07-25
 
